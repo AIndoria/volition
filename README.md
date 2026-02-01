@@ -148,27 +148,28 @@ Something like the one in GENESIS_TASK.md file currently in ~/docs. Please modif
 
 When you `pct enter` an Abe, the following **must exist**:
 
-The Docs must contain 0.0-Abe-Genesis_Prompt, 98-source_profile.md, 99-current_services.md, and Volition-1 through Volition-8 documentation.
+
 
 ```
 /root
-├── bin/
-├── docs/
-├── logs/
-├── src/
-├── .ssh/
-├── .abe-identity
-├── .abe-clipboard-<abe-name>.md
-├── working.log
-├── communications.log
-├── todo.db
+├── bin/ # Abe created tools go here, mandatory py files we have in src go here.
+├── docs/ # The Docs must contain 0.0-Abe-Genesis_Prompt, 98-source_profile.md, 99-current_services.md, and Volition-1 through Volition-8 documentation, AND Fleet Protocol*
+├── logs/ # changelogs abe create
+├── src/ # misc abe files
+├── .ssh/ # abes' ssh config
+├── .abe-identity # abe's identity file: designated class(abe-n) + chosen name + temp/top_k values
+├── .abe-clipboard-<abe-name>.md # Ephemeral Clipboard entries abes modify
+├── working.log # Current raw working log
+├── communications.log # Comm log (emails between abes)
+├── todo.db # Abes' self managed todo
 └── memory/
-    ├── episodes/
-    ├── tier_1_archive/
-    ├── overflow/
-    ├── downloads/
-    └── vector.db/
+    ├── episodes/ # Summarized Lossy Tier 2 memory that point to tier 1 archive below
+    ├── tier_1_archive/ # Raw logs of Abe turns
+    ├── overflow/ # Any web documents/logs that are too large to read
+    ├── downloads/ # Web downloads
+    └── vector.db/ # ChromaDB embeddings (Tier 3 memory) pointing back to Tier 2 memory.
 ```
+* : A base Fleet Protocol is provided. I've found that the Abes start well grounded with these base rules. However, a Fleet Protocol document is rules created _BY_ the abes, through voting. Further additions to that file should be done by the Abes themselves. You could encourage them to add something to that file when the opportunity arises or they're making extended use of their clipboard entries.
 
 If any of these are missing, the agent is malformed. You can manually copy files.
 
