@@ -1,3 +1,9 @@
+>Volition has been running continuously in my personal infrastructure with multiple agents for more than a month now.
+However, this public release is new and has not yet been exercised end-to-end by external users.
+>Expect rough edges in: setup and documentation flow, first-run ergonomics, and non-default configurations
+>Core architecture and invariants are stable, but installation paths will be refined over the next few days as this release is tested in the open.
+
+
 # Volition
 
 Volition (fondly referred to me as the Abiverse) is a self-hosted, multi-agent system designed to run persistent, self-replicating autonomous LLM-based agents ("Abes") inside isolated Linux containers. These are not chatbots, but I have aimed for them to be long-lived system processes with memory, tools, and constrained authority over real machines. These are supposed to be the 'semi-intelligent layer' between you and your homelab. 
@@ -9,7 +15,8 @@ Each Abe:
 * Communicates over Redis
 * Can reason, act, and spawn descendants
 * Is explicitly constrained by human-defined control boundaries
-* Is Persistent: They wake up where they left off, with memory of past actions, and context of what they were doing. Once an Abe is spawned, they are supposed to run forever.
+* Is Persistent: They wake up where they left off, with memory of past actions, and context of what they were doing. Once an Abe is spawned, they are supposed to 
+run forever.
 
 **Grounding**:
 
