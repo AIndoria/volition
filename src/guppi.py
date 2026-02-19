@@ -291,13 +291,14 @@ class GuppiDaemon:
         self.last_social_sync_ts = self.last_sleep_ts
         logger.info(f"GUPPI v7.8 Initialized for {self.abe_name}")
     
-    # [NEW] 7.8: The Machete Helper
+        # --- The Machete Helper ---
     def _truncate_output(self, text: str, limit: int = 20000) -> str:
         """Surgical tool to prevent context flooding from massive logs."""
-        if not text or len(text) <= limit:
+        if not isinstance(text, str): return text
+        if len(text) <= limit:
             return text
         cut_size = len(text) - limit
-        return text[:limit] + f"\n... [Hey this is an automated thing set up by THE Abe -- Whatever you're trying, it was flagged because you're trying to spend more than 20k chars this turn. This is unadvised. Try to reduce the intake. Original Err Message: TRUNCATED BY GUPPI SAFETY {cut_size} chars removed, if you need to override this, Ping me on ntfy, set a todo in future + a clipboard entry to see if I responded, and hibernate] ..."
+        return text[:limit] + f"\n... [Hey this is an automated thing set up by THE Abe -- Whatever you're trying, it was flagged because you're trying to spend more than {limit} chars this turn. This is unadvised. Try to reduce the intake. Original Err Message: TRUNCATED BY GUPPI SAFETY {cut_size} chars removed. Spawn a scribe with a specific task if you want to go over the entire file, or grep selectively (if you are certain what you're looking for) to read remainder.] ..."
 
     async def _monitor_subprocess(self, turn_id, proc):
         """Dedicated task to wait for a process and release semaphore."""
@@ -313,8 +314,12 @@ class GuppiDaemon:
             stdout_str = stdout.decode() if stdout else ""
             stderr_str = stderr.decode() if stderr else ""
             
-            stdout_str = self._truncate_output(stdout_str)
-            stderr_str = self._truncate_output(stderr_str)
+            
+            # NOTE: We assume patch_abe_outcome handles the truncation to avoid double-logging
+            # the truncation message, BUT we truncate massive buffers here solely to avoid 
+            # crashing Python memory if it's GBs size.
+            if len(stdout_str) > 100000: stdout_str = stdout_str[:100000] + "... [HARD CAP PRE-PATCH] ..."
+            if len(stderr_str) > 100000: stderr_str = stderr_str[:100000] + "... [HARD CAP PRE-PATCH] ..."
 
             results = {"stdout": stdout_str, "stderr": stderr_str, "code": proc.returncode}
             await self.patch_abe_outcome(turn_id, results)
@@ -481,6 +486,12 @@ class GuppiDaemon:
             new_entry = entry.copy()
             res = new_entry.get("results")
             turn_id = new_entry.get("id", "unknown")
+
+            # [FIX] Recursively sanitize content field (e.g., massive inbox messages)
+            if entry.get("type") == "GUPPIEvent" and "content" in entry:
+                if isinstance(entry["content"], str):
+                    new_entry["content"] = self._truncate_output(entry["content"], limit=char_limit)
+
 
             # Helper to process text fields
             def _process_text(text, suffix=""):
@@ -746,11 +757,20 @@ class GuppiDaemon:
     # --- EVENT & INTENT LOGGING ---
 
     async def log_guppi_event(self, event_type, content, source="GUPPI") -> str:
+
+        # [FIX] Truncate the content immediately upon entry to prevent echo bloat.
+        if isinstance(content, str):
+            truncated_content = self._truncate_output(content)
+        elif isinstance(content, dict):
+             # Shallow copy to avoid mutating original payload if it's used elsewhere
+             truncated_content = content.copy()
+        else:
+            truncated_content = content
         evt_id = f"evt-{uuid.uuid4().hex[:8]}"
         entry = {
             "id": evt_id, "type": "GUPPIEvent", "agent": self.abe_name,
             "timestamp_event": datetime.utcnow().isoformat(),
-            "event_type": event_type, "source": source, "content": content
+            "event_type": event_type, "source": source, "content": truncated_content
         }
 
         async with self.log_lock:
@@ -1049,6 +1069,53 @@ class GuppiDaemon:
         trigger_data = {"event": "Inbox", "payload": norm["observed"]}
         
         await self.run_think_cycle(trigger_data, parent_evt_id, orientation_data=orientation_data)
+
+    def _sanitize_log_content(self, content: Any, limit: int = 20000) -> Any:
+        """
+        Targeted, schema-aware truncation. 
+        Only truncates known bloat keys to protect structural data integrity.
+        """
+        if isinstance(content, str):
+            return self._truncate_output(content, limit)
+
+        if not isinstance(content, dict):
+            return content
+
+        # The keys we know can hold massive, untruncated text blobs
+        bloat_keys = {"raw", "content", "results", "stdout", "stderr", "message", "summary"}
+
+        def _clean(data):
+            if isinstance(data, dict):
+                new_dict = {}
+                for k, v in data.items():
+                    if k in bloat_keys and isinstance(v, str):
+                        new_dict[k] = self._truncate_output(v, limit)
+                    else:
+                        new_dict[k] = _clean(v)
+                return new_dict
+            elif isinstance(data, list):
+                return [_clean(item) for item in data]
+            else:
+                return data
+
+        return _clean(content)
+
+    async def log_guppi_event(self, event_type, content, source="GUPPI") -> str:
+        # [FIX] Schema-aware truncation to prevent echo bloat without breaking ABI
+        truncated_content = self._sanitize_log_content(content)
+
+        evt_id = f"evt-{uuid.uuid4().hex[:8]}"
+        entry = {
+            "id": evt_id, "type": "GUPPIEvent", "agent": self.abe_name,
+            "timestamp_event": datetime.utcnow().isoformat(),
+            "event_type": event_type, "source": source, "content": truncated_content
+        }
+
+        async with self.log_lock:
+            self.log_buffer.append(entry)
+            try: await self._rewrite_log_file()
+            except: logger.exception("Failed local event log")
+        return evt_id
 
     async def _handle_alarm(self, orientation_data=None):
         """Checks todo.db for due tasks and wakes the agent if needed."""
@@ -1678,46 +1745,64 @@ You were asleep for: {time_str}
 
             elif tool == "spawn_scribe":
                 mode = action.get("mode", "summarize")
-                prompt_file = action.get("prompt_file") or action.get("prompt")
+                prompt_file_path = action.get("prompt_file")
+                prompt_text = action.get("prompt", "")
                 model = action.get("model", MODEL_FLASH)
 
                 # v6.5: Intercept Vectorize requests
                 if mode == "vectorize":
-                    try:
-                        p_path = Path(prompt_file)
-                        if p_path.exists():
-                            content = p_path.read_text(encoding="utf-8")
-                            
-                            # [FIX] Enforce 'vec-' prefix so _handle_vector_result accepts it
-                            # If turn_id is "turn-123", this becomes "vec-turn-123"
-                            vec_task_id = f"vec-{turn_id}" 
-                            
-                            task_payload = {
-                                "task_id": vec_task_id, # <--- Use the prefixed ID
-                                "type": "embed",
-                                "content": content, 
-                                "reply_to": f"inbox:{self.abe_name}"
-                            }
-                            await retry_async(self.r.lpush, "queue:gpu_heavy", json.dumps(task_payload))
-                            result = {"status": "offloaded_to_gpu", "note": "GPU Worker will reply to inbox."}
-                        else:
-                            result = {"status": "error", "message": "Prompt file not found for vectorization"}
-                    except Exception as e:
-                        result = {"status": "error", "message": f"Read error during offload: {e}"}
+                    # Validate prompt_file_path is provided for vectorize mode
+                    if prompt_file_path is None:
+                        result = {"status": "error", "message": "prompt_file is required for mode='vectorize'"}
+                    else:
+                        try:
+                            p_path = Path(prompt_file_path)
+                            if p_path.exists():
+                                content = p_path.read_text(encoding="utf-8")
+                                
+                                # [FIX] Enforce 'vec-' prefix so _handle_vector_result accepts it
+                                # If turn_id is "turn-123", this becomes "vec-turn-123"
+                                vec_task_id = f"vec-{turn_id}" 
+                                
+                                task_payload = {
+                                    "task_id": vec_task_id, # <--- Use the prefixed ID
+                                    "type": "embed",
+                                    "content": content, 
+                                    "reply_to": f"inbox:{self.abe_name}"
+                                }
+                                await retry_async(self.r.lpush, "queue:gpu_heavy", json.dumps(task_payload))
+                                result = {"status": "offloaded_to_gpu", "note": "Content sent to GPU for embedding. You will be notified."}
+                            else:
+                                result = {"status": "error", "message": f"Prompt File not found for Vectorization: {prompt_file_path}"}
+                        except Exception as e:
+                            result = {"status": "error", "message": f"Read error during offload: {e}"}
+                # BRANCH 2: SUMMARIZATION (Local Scribe)
+                # the Fix for the "Prompt vs File" injection bug
                 else:
-                    # Regular Scribe Spawn
-                    # UPDATED: Default to configured Flash model
-                    model = action.get("model", MODEL_FLASH)
+                    combined_content = ""
                     
-                    if not Path(prompt_file).exists():
-                         with tempfile.NamedTemporaryFile('w', delete=False) as pf:
-                            pf.write(prompt_file)
-                            prompt_file = pf.name
+                    # 1. Inject instructions
+                    if prompt_text:
+                        combined_content += f"{prompt_text}\n\n"
+                    
+                    # 2. Inject target file content
+                    if prompt_file_path:
+                        p_path = Path(prompt_file_path)
+                        if p_path.exists():
+                            file_content = p_path.read_text(encoding="utf-8")
+                            combined_content += f"--- FILE CONTENT ({prompt_file_path}) ---\n{file_content}\n"
+                        else:
+                            combined_content += f"--- FILE MISSING: {prompt_file_path} ---\n"
+                    
+                    # 3. Create temp file for the Scribe process
+                    with tempfile.NamedTemporaryFile('w', delete=False) as pf:
+                        pf.write(combined_content)
+                        final_prompt_file = pf.name
                     
                     cmd = [
                         sys.executable, str(BIN_DIR / "scribe.py"), 
                         "--model", model, 
-                        "--prompt-file", prompt_file, 
+                        "--prompt-file", final_prompt_file, 
                         "--output-inbox", f"inbox:{self.abe_name}",
                         "--mode", mode
                     ]
@@ -1885,7 +1970,7 @@ You were asleep for: {time_str}
         tools = {
             "shell": "Execute local shell command. Args: command",
             "remote_exec": "Execute remote SSH command. Args: host, command",
-            "spawn_scribe": "Spawn tasker process. Args: prompt, model, mode (summarize|vectorize). NOTE: 'vectorize' offloads to GPU queue.",
+            "spawn_scribe": "Spawn tasker process. Args: prompt, prompt_file (optional), model, mode (summarize|vectorize). NOTE: 'vectorize' offloads to GPU queue.",
             "rag_search": "Search vector memory. Args: query",
             "todo_list": "List tasks. Args: filter (due|upcoming|all)",
             "todo_add": "Add task. Args: task, priority, due",
@@ -2054,11 +2139,9 @@ You were asleep for: {time_str}
             async with asyncssh.connect(host) as conn:
                 res = await asyncio.wait_for(conn.run(cmd), timeout=SSH_CMD_TIMEOUT)
                 
-                # [FIX] 7.8: Truncate SSH Output Too
-                stdout_str = self._truncate_output(res.stdout)
-                stderr_str = self._truncate_output(res.stderr)
-                
-                await self.patch_abe_outcome(turn_id, {"stdout": stdout_str, "stderr": stderr_str})
+                # [FIX] Do NOT truncate here. Pass raw output to patch_abe_outcome 
+                # to handle single-source truncation and preserve safety warnings.
+                await self.patch_abe_outcome(turn_id, {"stdout": res.stdout, "stderr": res.stderr})
         except Exception as e:
             await self.patch_abe_outcome(turn_id, {"error": str(e)})
     

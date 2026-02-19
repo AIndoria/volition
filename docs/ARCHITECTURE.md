@@ -22,8 +22,7 @@ The active system specification. Reflects the codebase in /src. Note: Almost all
 
 - Volition-7-Log-Schemas.md: The strict JSON contracts for logs.
 
-- Volition-8-Governance-Human-Interface.md: The human-agent interface and governance. (DO NOT SHOW THIS TO THE AGENTS)
-
+- Volition-8-Governance-Human-Interface.md: The human-agent interface and governance.
 
 ### The Archive (Legacy & Evolution)
 
