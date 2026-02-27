@@ -1507,10 +1507,8 @@ class GuppiDaemon:
                 except: pass
 
     async def call_abe_api(self, prompt_text: str, model_id: str = GEMINI_MODEL) -> Dict:
-        if LLM_PROVIDER == "openrouter":
-            return await self._call_openrouter(model_id, prompt_text)
-        else:
-            return await self._call_google(model_id, prompt_text)
+        # Everything routes through the OpenAI-compatible endpoint now
+        return await self._call_openai_compat(model_id, prompt_text)
 
     async def _call_google(self, model_id, prompt):
         if not GEMINI_API_KEY:
