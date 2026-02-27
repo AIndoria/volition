@@ -78,8 +78,6 @@ REDIS_URL = os.environ.get("REDIS_URL", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}
 NTFY_URL = os.environ.get("NTFY_URL")
 NTFY_TOKEN = os.environ.get("NTFY_TOKEN")
 
-if not NTFY_URL or not NTFY_TOKEN:
-    logger.warning("NTFY not configured; human notifications disabled.")
 
 # v6.1: Search Config
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "https://civitat.es/search") 
@@ -124,6 +122,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger("guppi")
 
+if not NTFY_URL or not NTFY_TOKEN:
+    logger.warning("NTFY not configured; human notifications disabled.")
+    
 
 # --- UTILITY HELPERS ---
 
