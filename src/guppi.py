@@ -1769,11 +1769,13 @@ You were asleep for: {time_str}
                 prompt_file_path = action.get("prompt_file")
                 prompt_text = action.get("prompt", "")
                 
-                # Enforce routing rules: Abe does not choose the model for Scribes
+                # Enforce routing rules based on the Genesis prompt promises
                 if mode == "analyze":
                     model = os.environ.get("MODEL_SCRIBE", "local/nanbeige-4.1-3B")
+                elif mode == "summarize":
+                    model = os.environ.get("MODEL_SUMMARIZE", "local/mistral")
                 else:
-                    model = MODEL_FLASH
+                    model = MODEL_FLASH # Fallback just in case
 
                 # v6.5: Intercept Vectorize requests
                 if mode == "vectorize":
