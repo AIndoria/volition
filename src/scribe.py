@@ -81,96 +81,62 @@ async def push_result(redis_url: str, inbox: str, event_type: str, content: Any,
         sys.exit(1)
 
 async def run_llm_generation(model_name: str, prompt_text: str) -> str:
-    """Dispatches to the correct provider."""
-    if LLM_PROVIDER == "openrouter":
-        return await _run_openrouter(model_name, prompt_text)
-    else:
-        return await _run_google(model_name, prompt_text)
-
-async def _run_google(model_name: str, prompt_text: str) -> str:
-    """Calls the Gemini API (Native)."""
-    if not GEMINI_API_KEY:
-        raise ValueError("GEMINI_API_KEY environment variable not set.")
-    if not genai:
-        raise ImportError("google-genai library not installed.")
-
-    # Map friendly names to actual model IDs if needed
-    # Handle explicit google/ prefix if GUPPI sends it
-    model_id = model_name.replace("google/", "")
-    # Strip thinking suffix if passed to native (not supported this way in native yet usually)
-    if ":thinking" in model_id:
-        model_id = model_id.split(":")[0]
+    """Unified OpenAI-Compatible execution for Scribe."""
+    base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
+    api_key = os.environ.get("OPENAI_API_KEY", OPENROUTER_API_KEY)
     
-    if "flash" in model_name and "2.5" not in model_name and "3" not in model_name:
-         model_id = "gemini-2.5-flash"
-    
-    logger.info(f"Calling Google LLM: {model_id}")
-    
-    # We wrap synchronous Google call in thread if needed
-    def _call():
-        client = genai.Client(api_key=GEMINI_API_KEY)
-        response = client.models.generate_content(
-            model=model_id,
-            contents=prompt_text,
-            config=types.GenerateContentConfig(
-                temperature=1.0, 
-            )
-        )
-        return response.text
-
-    return await asyncio.to_thread(_call)
-
-async def _run_openrouter(model_name: str, prompt_text: str) -> str:
-    """Calls OpenRouter."""
-    if not OPENROUTER_API_KEY:
-        raise ValueError("OPENROUTER_API_KEY environment variable not set.")
-    
-    # --- FIX: Generic Auto-Correction & Thinking Support ---
     model_id = model_name
-    use_thinking = False
-    
-    # 1. Check for Thinking Suffix
-    if ":thinking" in model_id:
-        model_id = model_id.split(":")[0]
-        use_thinking = True
-    
-    # 2. If it doesn't have a provider prefix (no slash), and looks like gemini...
-    if "/" not in model_id and "gemini" in model_id.lower():
-        # Prepend google/
-        model_id = f"google/{model_id}"
-        
-    # --------------------------------------------------
-    url = "https://openrouter.ai/api/v1/chat/completions"
+    use_thinking = ":thinking" in model_id
+    if use_thinking: model_id = model_id.split(":")[0]
+
+    url = f"{base_url}/chat/completions"
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "HTTP-Referer": OPENROUTER_SITE_URL,
         "X-Title": OPENROUTER_APP_NAME,
         "Content-Type": "application/json"
     }
     
     payload = {
-        "model": model_id, # Use the corrected ID
+        "model": model_id,
         "messages": [{"role": "user", "content": prompt_text}],
-        "response_format": {"type": "json_object"},
-        "temperature": 1.0
     }
-    
-    # v6.5.1: Enable Thinking if requested (Unified Parameter)
-    if use_thinking:
-        payload["reasoning"] = {
-            "effort": "high"
-        }
 
-    logger.info(f"Calling OpenRouter: {model_id} (orig: {model_name}) Thinking={use_thinking}")
+    if use_thinking and "openrouter" in base_url.lower():
+        payload["reasoning"] = {"effort": "high"}
 
     async with aiohttp.ClientSession() as session:
-        async with session.post(url, headers=headers, json=payload) as resp:
+        # Bumped timeout to 1200s (20 mins) specifically to account for Nanbeige's deep thinking
+        async with session.post(url, headers=headers, json=payload, timeout=1200) as resp:
             if resp.status != 200:
                 err = await resp.text()
-                raise Exception(f"OpenRouter Error {resp.status}: {err}")
+                raise Exception(f"API Error {resp.status}: {err}")
+            
             data = await resp.json()
-            return data["choices"][0]["message"]["content"]
-
+            message = data["choices"][0]["message"]
+            text = message.get("content", "")
+            
+            # Extract reasoning to prevent it from bleeding into the final report
+            reasoning = message.get("reasoning_content", "")
+            if not reasoning and "<think>" in text:
+                think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
+                if think_match:
+                    reasoning = think_match.group(1).strip()
+                    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+            
+            # Persist Scribe's internal monologue
+            if reasoning:
+                today_str = datetime.utcnow().strftime("%Y-%m-%d")
+                abe_root = Path(os.environ.get("ABE_ROOT", Path.home()))
+                thoughts_file = abe_root / f"logs/thoughts/scribe-{today_str}.thot"
+                thoughts_file.parent.mkdir(parents=True, exist_ok=True)
+                
+                with open(thoughts_file, "a", encoding="utf-8") as f:
+                    ts = datetime.utcnow().isoformat()
+                    f.write(f"\n--- [SCRIBE THOUGHT BURST: {ts} | Model: {model_id}] ---\n{reasoning}\n--- [END] ---\n")
+            
+            return text
+        
 async def main():
     parser = argparse.ArgumentParser(description="Volition Scribe")
     # UPDATED DEFAULT
