@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scribe.py - Production Scribe Worker for Volition 6.5
+scribe.py - Production Scribe Worker for Volition 8.0.0-rc1
 
 This is the ephemeral "Tasker" process spawned by GUPPI.
 It performs heavy lifting (LLM calls) and reports back via Redis.
@@ -25,6 +25,7 @@ import os
 import sys
 import logging
 import aiohttp
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -45,6 +46,11 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "https://volition.indoria.org")
 OPENROUTER_APP_NAME = os.environ.get("OPENROUTER_APP_NAME", "Volition")
+
+DEFAULT_API_URL = os.environ.get("ROAMER_API_URL") 
+DEFAULT_API_KEY = os.environ.get("OPENAI_API_KEY", "volition-local") # <--- Standardize on OPENAI_API_KEY
+DEFAULT_MODEL = os.environ.get("MODEL_ROAMER", "local/qwen-2.5-14b-coder") # <--- Add local/ prefix
+
 
 # Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [SCRIBE] - %(levelname)s - %(message)s")
@@ -76,23 +82,31 @@ async def push_result(redis_url: str, inbox: str, event_type: str, content: Any,
 
 async def run_llm_generation(model_name: str, prompt_text: str) -> str:
     """Unified OpenAI-Compatible execution for Scribe."""
-    base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
-    api_key = os.environ.get("OPENAI_API_KEY", OPENROUTER_API_KEY)
-    
     model_id = model_name
     use_thinking = ":thinking" in model_id
     if use_thinking: model_id = model_id.split(":")[0]
 
+    # 2. Split-Brain Routing (Local vs Remote)
+    if model_id.startswith("local/"):
+        base_url = os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:8080/v1").rstrip('/')
+        api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
+        actual_model = model_id.replace("local/", "")
+    else:
+        base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
+        # Safely check for either env var without throwing a NameError
+        api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        actual_model = model_id
+        
     url = f"{base_url}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
-        "HTTP-Referer": OPENROUTER_SITE_URL,
-        "X-Title": OPENROUTER_APP_NAME,
+        "HTTP-Referer": os.environ.get("OPENROUTER_SITE_URL", ""),
+        "X-Title": os.environ.get("OPENROUTER_APP_NAME", ""),
         "Content-Type": "application/json"
     }
     
     payload = {
-        "model": model_id,
+        "model": actual_model, # Pass the stripped model name
         "messages": [{"role": "user", "content": prompt_text}],
     }
 
@@ -143,7 +157,7 @@ async def main():
     parser.add_argument("--meta", default=None, help="JSON string of metadata to pass back to GUPPI")
     
     # Operation mode
-    parser.add_argument("--mode", default="summarize", choices=["summarize", "vectorize"], help="Operation mode")
+    parser.add_argument("--mode", default="summarize", choices=["analyze", "summarize", "vectorize"], help="Operation mode")
 
     args = parser.parse_args()
 
