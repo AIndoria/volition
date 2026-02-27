@@ -83,16 +83,14 @@ NTFY_TOKEN = os.environ.get("NTFY_TOKEN")
 SEARXNG_URL = os.environ.get("SEARXNG_URL", "https://civitat.es/search") 
 
 # API Config
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "google")
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_SITE_URL = os.environ.get("OPENROUTER_SITE_URL", "https://volition.indoria.org")
 OPENROUTER_APP_NAME = os.environ.get("OPENROUTER_APP_NAME", "Volition")
 
 # v6.5: Split-Brain Config
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-pro") 
-MODEL_PRO = os.environ.get("OPENROUTER_MODEL_PRO") or os.environ.get("GEMINI_MODEL_PRO") or GEMINI_MODEL
-MODEL_FLASH = os.environ.get("OPENROUTER_MODEL_FLASH") or os.environ.get("GEMINI_MODEL_FLASH", "gemini-2.5-flash")
+# Defaulting to standard model names so they map cleanly via OpenRouter or Local
+MODEL_PRO = os.environ.get("MODEL_PRO", "google/gemini-2.5-pro")
+MODEL_FLASH = os.environ.get("MODEL_FLASH", "google/gemini-2.5-flash")
 
 # v7.0: Social Stream Config
 SOCIAL_DIGEST_STREAM = "volition:social_digests"
@@ -735,7 +733,7 @@ class GuppiDaemon:
           })
           
           # v7.1: Use Pro model (Thinking) for better synthesis quality
-          current_model = MODEL_PRO or "google/gemini-3-flash-preview:thinking"
+          current_model = MODEL_PRO
           
           cmd = [
               sys.executable, str(BIN_DIR / "scribe.py"), 
@@ -1526,12 +1524,22 @@ class GuppiDaemon:
             "X-Title": OPENROUTER_APP_NAME,
             "Content-Type": "application/json"
         }
+        use_thinking = ":thinking" in model_id # this doesnt feel very...safe but we'll see.
+        if use_thinking: 
+            model_id = model_id.split(":")[0]
         
         
         payload = {
             "model": model_id,
-            "messages": [{"role": "user", "content": prompt}]
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"}
         }
+
+        # OpenRouter needs the explicit flag. 
+        # Local models will just naturally output reasoning tokens.
+        # I highly suggest you use a competent local model (Q3.5-27b is good)
+        if use_thinking and "openrouter" in base_url.lower():
+            payload["reasoning"] = {"effort": "high"}
         
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=300) as resp:
@@ -1944,7 +1952,6 @@ You were asleep for: {time_str}
         # Only silence administrative state changes. 
         # Chat, Email, and Shell MUST notify on success.
         quiet_tools = {
-            "todo_add", 
             "snooze_task",
             "hibernate" 
         }
@@ -2076,7 +2083,7 @@ You were asleep for: {time_str}
             # Use 'update_stub' mode to trigger the handler in main loop
             meta_json = json.dumps({"job_type": "update_stub", "maintenance": True})
             # Use current flash model for the compression task
-            current_model = MODEL_FLASH or "gemini-3-flash-preview"
+            current_model = MODEL_FLASH
             
             cmd = [
                 sys.executable, str(BIN_DIR / "scribe.py"),
