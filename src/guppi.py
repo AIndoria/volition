@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""GUPPI daemon - Volition 7.8 (The Safety Update)
-The "Body" of the Abe Agent.
-
-Status: STABLE RELEASE 7.8
-- Architecture: Refractory Scheduler (Hot Senses / Paced Workload)
-- Logic: STRICT 7.2.3.1 COMPLIANCE
-- Feature: Clipboard (Persistent Scratchpad)
-- Safety: Deadman Switch (Anti-Ghosting)
-- Safety: Output Machete (Source Truncation)
+"""GUPPI daemon - Volition 8,0,0-rc1 (The Roamer/Scribe Update)
+Status: STABLE
+- Feature: Allow Roamers and Scribes Separately
+- Feature: Merge different Provider calls into one
 """
 
 import asyncio
@@ -89,8 +84,9 @@ OPENROUTER_APP_NAME = os.environ.get("OPENROUTER_APP_NAME", "Volition")
 
 # v6.5: Split-Brain Config
 # Defaulting to standard model names so they map cleanly via OpenRouter or Local
-MODEL_PRO = os.environ.get("MODEL_PRO", "google/gemini-2.5-pro")
-MODEL_FLASH = os.environ.get("MODEL_FLASH", "google/gemini-2.5-flash")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview") 
+MODEL_PRO = os.environ.get("MODEL_PRO", "google/gemini-3-flash-preview:thinking")
+MODEL_FLASH = os.environ.get("MODEL_FLASH", "google/gemini-3-flash-preview")
 
 # v7.0: Social Stream Config
 SOCIAL_DIGEST_STREAM = "volition:social_digests"
@@ -695,62 +691,62 @@ class GuppiDaemon:
         self._is_pruning = True
         logger.info("[PRUNE] method _is_pruning set TRUE")
         try:
-          ts = int(time.time())
-          archive_path = ARCHIVE_DIR / f"log-{ts}.jsonl"
-          try: shutil.copy2(WORKING_LOG, archive_path)
-          except: pass
-          try:
-              log_content = archive_path.read_text()
-          except Exception as e:
-              log_content = f"Error reading log: {e}"
+            ts = int(time.time())
+            archive_path = ARCHIVE_DIR / f"log-{ts}.jsonl"
+            try: shutil.copy2(WORKING_LOG, archive_path)
+            except: pass
+            try:
+                log_content = archive_path.read_text()
+            except Exception as e:
+                log_content = f"Error reading log: {e}"
 
-          # v7.1: Improved Narrative Prompt
-          prompt = (
-              f"Synthesize these logs into a Tier 2 Episode Memory.\n"
-              f"Focus on the NARRATIVE arc of what you accomplished or discovered.\n"
-              f"IGNORE trivial mechanical steps (e.g., successful 'ls' or 'cd' commands) unless they revealed something critical.\n"
-              f"If you were asleep or idle, state that clearly and briefly.\n\n"
-              f"REQUIRED OUTPUT FORMAT:\n\n"
-              f"## Narrative Summary\n"
-              f"(A 2-3 sentence overview of the episode's main events)\n\n"
-              f"## Key Decisions & Outcomes\n"
-              f"(Bullet points of meaningful choices made and their results)\n\n"
-              f"## Changed State / New Knowledge\n"
-              f"(What is different now compared to the start? New files? New constraints?)\n\n"
-              f"## Pending / Unresolved\n"
-              f"(Only list actual blockers or unfinished tasks that require future attention that WERE in the logs, Do not make assumptions.)\n\n"
-              f"Source log:\n{log_content}"
-          )
-          
-          with tempfile.NamedTemporaryFile('w', delete=False) as pf:
-              pf.write(prompt)
-              prompt_path = pf.name
-          
-          meta_json = json.dumps({
-              "maintenance": True,
-              "source_tier_1": f"log-{ts}.jsonl",
-              "mode": "summarize" 
-          })
-          
-          # v7.1: Use Pro model (Thinking) for better synthesis quality
-          current_model = MODEL_PRO
-          
-          cmd = [
-              sys.executable, str(BIN_DIR / "scribe.py"), 
-              "--model", current_model, 
-              "--prompt-file", prompt_path, 
-              "--output-inbox", f"inbox:{self.abe_name}",
-              "--mode", "summarize",
-              "--meta", meta_json
-          ]
-          await self._spawn_subprocess_exec(f"auto-prune-{ts}", cmd, tracked=False)
+            # v7.1: Improved Narrative Prompt
+            prompt = (
+                f"Synthesize these logs into a Tier 2 Episode Memory.\n"
+                f"Focus on the NARRATIVE arc of what you accomplished or discovered.\n"
+                f"IGNORE trivial mechanical steps (e.g., successful 'ls' or 'cd' commands) unless they revealed something critical.\n"
+                f"If you were asleep or idle, state that clearly and briefly.\n\n"
+                f"REQUIRED OUTPUT FORMAT:\n\n"
+                f"## Narrative Summary\n"
+                f"(A 2-3 sentence overview of the episode's main events)\n\n"
+                f"## Key Decisions & Outcomes\n"
+                f"(Bullet points of meaningful choices made and their results)\n\n"
+                f"## Changed State / New Knowledge\n"
+                f"(What is different now compared to the start? New files? New constraints?)\n\n"
+                f"## Pending / Unresolved\n"
+                f"(Only list actual blockers or unfinished tasks that require future attention that WERE in the logs, Do not make assumptions.)\n\n"
+                f"Source log:\n{log_content}"
+            )
+            
+            with tempfile.NamedTemporaryFile('w', delete=False) as pf:
+                pf.write(prompt)
+                prompt_path = pf.name
+            
+            meta_json = json.dumps({
+                "maintenance": True,
+                "source_tier_1": f"log-{ts}.jsonl",
+                "mode": "summarize" 
+            })
+            
+            # v7.1: Use Pro model (Thinking) for better synthesis quality
+            current_model = MODEL_PRO
+            
+            cmd = [
+                sys.executable, str(BIN_DIR / "scribe.py"), 
+                "--model", current_model, 
+                "--prompt-file", prompt_path, 
+                "--output-inbox", f"inbox:{self.abe_name}",
+                "--mode", "summarize",
+                "--meta", meta_json
+            ]
+            await self._spawn_subprocess_exec(f"auto-prune-{ts}", cmd, tracked=False)
 
-          async with self.log_lock:
-              self.log_buffer = self.log_buffer[-15:]
-              await self._rewrite_log_file()
+            async with self.log_lock:
+                self.log_buffer = self.log_buffer[-15:]
+                await self._rewrite_log_file()
         finally:
-          logger.info("[PRUNE] EXIT _prune_logs (before reset)")
-          self._is_pruning = False
+            logger.info("[PRUNE] EXIT _prune_logs (before reset)")
+            self._is_pruning = False
 
 
     # --- EVENT & INTENT LOGGING ---
@@ -761,8 +757,8 @@ class GuppiDaemon:
         if isinstance(content, str):
             truncated_content = self._truncate_output(content)
         elif isinstance(content, dict):
-             # Shallow copy to avoid mutating original payload if it's used elsewhere
-             truncated_content = content.copy()
+            # Shallow copy to avoid mutating original payload if it's used elsewhere
+            truncated_content = content.copy()
         else:
             truncated_content = content
         evt_id = f"evt-{uuid.uuid4().hex[:8]}"
@@ -1172,7 +1168,7 @@ class GuppiDaemon:
 
         # Generic/Legacy Hook
         if "rag_result" in data:
-             await self.log_guppi_event("InternalResult", data, source="Internal")
+            await self.log_guppi_event("InternalResult", data, source="Internal")
 
     
     async def _fetch_chat_context(self, stream_name, count=5):
@@ -1510,37 +1506,43 @@ class GuppiDaemon:
         return await self._call_openai_compat(model_id, prompt_text)
     
     async def _call_openai_compat(self, model_id, prompt):
-        # Pull from env, default to OpenRouter if not set
-        base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1")
-        api_key = os.environ.get("OPENAI_API_KEY", OPENROUTER_API_KEY)
+        # 1. Detect Thinking Intent
+        use_thinking = ":thinking" in model_id
+        if use_thinking: 
+            model_id = model_id.split(":")[0]
+
+        # 2. Split-Brain Routing (Local vs Remote)
+        if model_id.startswith("local/"):
+            # For Guppi: os.environ.get("GUPPI_LOCAL_API_URL", ...)
+            # For Scribe: os.environ.get("SCRIBE_API_URL", ...)
+            base_url = os.environ.get("GUPPI_LOCAL_API_URL", "http://127.0.0.1:8080/v1").rstrip('/')
+            api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
+            actual_model = model_id.replace("local/", "")
+        else:
+            base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
+            # Safely check for either env var without throwing a NameError
+            api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+            actual_model = model_id
             
-        # Prevent double-slashes if base_url has a trailing slash
-        base_url = base_url.rstrip('/')
         url = f"{base_url}/chat/completions"
-        
         headers = {
             "Authorization": f"Bearer {api_key}",
             "HTTP-Referer": OPENROUTER_SITE_URL,
             "X-Title": OPENROUTER_APP_NAME,
             "Content-Type": "application/json"
         }
-        use_thinking = ":thinking" in model_id # this doesnt feel very...safe but we'll see.
-        if use_thinking: 
-            model_id = model_id.split(":")[0]
-        
         
         payload = {
-            "model": model_id,
+            "model": actual_model,  # Pass the stripped model name
             "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"}
         }
 
-        # OpenRouter needs the explicit flag. 
-        # Local models will just naturally output reasoning tokens.
-        # I highly suggest you use a competent local model (Q3.5-27b is good)
+        # 3. Route the Thinking Mechanism
+        # Only OpenRouter needs the explicit flag. llama.cpp handles it natively now.
         if use_thinking and "openrouter" in base_url.lower():
             payload["reasoning"] = {"effort": "high"}
-        
+
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=300) as resp:
                 if resp.status != 200:
@@ -1607,8 +1609,8 @@ class GuppiDaemon:
         # v6.5: Identity Priors Injection
         priors = ""
         if PRIORS_STUB_FILE.exists():
-             try: priors = f"\n[IDENTITY_PRIORS]\n{PRIORS_STUB_FILE.read_text().strip()}\n"
-             except: pass
+            try: priors = f"\n[IDENTITY_PRIORS]\n{PRIORS_STUB_FILE.read_text().strip()}\n"
+            except: pass
         
         summaries = ""
         try:
@@ -1736,19 +1738,42 @@ You were asleep for: {time_str}
                 
                 resolved_p = p.resolve()
                 if resolved_p == IDENTITY_FILE.resolve():
-                     self._refresh_identity()
-                     result["note"] = f"Identity hot-reloaded. You are now known as: {self.display_name}"
+                    self._refresh_identity()
+                    result["note"] = f"Identity hot-reloaded. You are now known as: {self.display_name}"
                 elif resolved_p == PRIORS_SOURCE_FILE.resolve():
                     await self._trigger_priors_compression()
                     result["note"] = "Priors updated. Scribe spawned to regenerate stub."
 
                 result["path"] = str(p)
 
+            elif tool == "spawn_roamer":
+                directive = action.get("directive")
+                target_host = action.get("target_host", "local")
+                
+                if not directive:
+                    result = {"status": "error", "message": "Missing directive for roamer"}
+                else:
+                    cmd = [
+                        sys.executable, str(BIN_DIR / "roamer.py"),
+                        "--directive", directive,
+                        "--target-host", target_host,
+                        "--output-inbox", f"inbox:{self.abe_name}"
+                    ]
+                    # Spawn untracked so GUPPI isn't blocked waiting for the investigation
+                    await self._spawn_subprocess_exec(turn_id, cmd, tracked=False)
+                    result = {"status": "spawned_untracked", "note": f"Roamer dispatched to investigate '{target_host}'. Results will arrive in your inbox."}
+                return
+
             elif tool == "spawn_scribe":
                 mode = action.get("mode", "summarize")
                 prompt_file_path = action.get("prompt_file")
                 prompt_text = action.get("prompt", "")
-                model = action.get("model", MODEL_FLASH)
+                
+                # Enforce routing rules: Abe does not choose the model for Scribes
+                if mode == "analyze":
+                    model = os.environ.get("MODEL_SCRIBE", "local/nanbeige-4.1-3B")
+                else:
+                    model = MODEL_FLASH
 
                 # v6.5: Intercept Vectorize requests
                 if mode == "vectorize":
@@ -1766,10 +1791,11 @@ You were asleep for: {time_str}
                                 vec_task_id = f"vec-{turn_id}" 
                                 
                                 task_payload = {
-                                    "task_id": vec_task_id, # <--- Use the prefixed ID
+                                    "task_id": vec_task_id,
                                     "type": "embed",
                                     "content": content, 
-                                    "reply_to": f"inbox:{self.abe_name}"
+                                    "source_file": str(p_path.resolve()), # <--- Pass the file path
+                                    "reply_to": self.internal_queue # <--- Route to internal queue, not inbox directly
                                 }
                                 await retry_async(self.r.lpush, "queue:gpu_heavy", json.dumps(task_payload))
                                 result = {"status": "offloaded_to_gpu", "note": "Content sent to GPU for embedding. You will be notified."}
@@ -2194,19 +2220,29 @@ You were asleep for: {time_str}
             
             if not vector or not task_id.startswith("vec-"): return False
 
-            ts_id = task_id.replace("vec-", "")
-            ep_filename = f"ep-{ts_id}.md"
-            ep_path = EPISODES_DIR / ep_filename
+            # Check if this was a manually requested file vectorization
+            source_file = result_payload.get("source_file")
+            
+            if source_file:
+                ep_path = Path(source_file)
+                ep_filename = ep_path.name
+                doc_type = "manual_ingest"
+            else:
+                # Fallback to automatic Episode logic
+                ts_id = task_id.replace("vec-", "")
+                ep_filename = f"ep-{ts_id}.md"
+                ep_path = EPISODES_DIR / ep_filename
+                doc_type = "tier_2_episode"
 
             if not ep_path.exists():
-                logger.warning(f"Original episode file not found for vector: {ep_path}")
+                logger.warning(f"Original file not found for vector: {ep_path}")
                 return False
 
-            text_body = ep_path.read_text()
+            text_body = ep_path.read_text(encoding="utf-8")
             meta = {
                 "source": ep_filename,
                 "ingested_at": datetime.utcnow().isoformat(),
-                "type": "tier_2_episode"
+                "type": doc_type
             }
 
             def _insert_sync():
