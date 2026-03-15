@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUPPI daemon - Volition 8,0,0-rc1 (The Roamer/Scribe Update)
+"""GUPPI daemon - Volition 8.0.0-rc1 (The Roamer/Scribe Update)
 Status: STABLE
 - Feature: Allow Roamers and Scribes Separately
 - Feature: Merge different Provider calls into one
@@ -87,6 +87,7 @@ OPENROUTER_APP_NAME = os.environ.get("OPENROUTER_APP_NAME", "Volition")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview") 
 MODEL_PRO = os.environ.get("MODEL_PRO", "google/gemini-3-flash-preview:thinking")
 MODEL_FLASH = os.environ.get("MODEL_FLASH", "google/gemini-3-flash-preview")
+MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "local/mistral") 
 
 # v7.0: Social Stream Config
 SOCIAL_DIGEST_STREAM = "volition:social_digests"
@@ -729,7 +730,7 @@ class GuppiDaemon:
             })
             
             # v7.1: Use Pro model (Thinking) for better synthesis quality
-            current_model = MODEL_PRO
+            current_model = MODEL_SUMMARIZE
             
             cmd = [
                 sys.executable, str(BIN_DIR / "scribe.py"), 
@@ -849,8 +850,11 @@ class GuppiDaemon:
             meta = norm["observed"].get("meta", {})
             content = str(norm["observed"].get("content", ""))
             
-            # v6.5: Safer Check (Restored from 6.4.3)
-            if meta.get("mode") == "summarize" and content:
+            # THE FIX: Extract the event type safely from the payload envelope
+            event_type = norm["observed"].get("event_type", norm["observed"].get("event", ""))
+            
+            # THE FIX: Only ingest if Scribe actually succeeded (TaskCompleted)
+            if meta.get("mode") == "summarize" and content and event_type == "TaskCompleted":
                 source_file = meta.get("source_tier_1", "unknown_source.jsonl")
                 summary_text = content
                 
@@ -861,12 +865,14 @@ class GuppiDaemon:
                 ep_path = EPISODES_DIR / filename
 
                 if not summary_text.strip().startswith("---"):
-                    current_model = MODEL_FLASH or "gemini-3-flash-preview"
-                    header = f"---\ngenerated_at: {iso_ts}\ntype: tier_2_episode\nmodel: {current_model}\nsource_tier_1: {source_file}\n---\n\n"
+                    # Pull the actual model name from Scribe's metadata payload
+                    actual_scribe_model = meta.get("model", MODEL_FLASH)
+                    header = f"---\ngenerated_at: {iso_ts}\ntype: tier_2_episode\nmodel: {actual_scribe_model}\nsource_tier_1: {source_file}\n---\n\n"
                     summary_text = header + summary_text
 
                 ep_path.write_text(summary_text)
                 logger.info(f"Ingested Tier 2 Episode: {filename}")
+                
                 # v7.2 Fix: Use Internal Queue for routing
                 task_payload = {
                     "task_id": f"vec-{file_uuid}", 
@@ -1531,11 +1537,26 @@ class GuppiDaemon:
             "X-Title": OPENROUTER_APP_NAME,
             "Content-Type": "application/json"
         }
+
+        # 1. Load the Identity Stats
+        target_temp = float(self.identity.get("temp", 1.0))
+        target_top_p = float(self.identity.get("top_p", 0.95))
         
+        # 2. Force top_k to be an integer (The "Abe-01" Safety)
+        try:
+            raw_k = self.identity.get("top_k", 40)
+            target_top_k = int(float(raw_k)) # Handles both "40" and "0.9" gracefully
+            if target_top_k < 1: target_top_k = 40 # Sanity check
+        except:
+            target_top_k = 40
+
         payload = {
-            "model": actual_model,  # Pass the stripped model name
+            "model": actual_model,
             "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"}
+            "response_format": {"type": "json_object"},
+            "temperature": target_temp,
+            "top_p": target_top_p,
+            "top_k": target_top_k
         }
 
         # 3. Route the Thinking Mechanism
@@ -1544,7 +1565,7 @@ class GuppiDaemon:
             payload["reasoning"] = {"effort": "high"}
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=300) as resp:
+            async with session.post(url, headers=headers, json=payload, timeout=1200) as resp:
                 if resp.status != 200:
                     err = await resp.text()
                     logger.error(f"OpenAI-Compat Error {resp.status}: {err}")
@@ -1762,7 +1783,6 @@ You were asleep for: {time_str}
                     # Spawn untracked so GUPPI isn't blocked waiting for the investigation
                     await self._spawn_subprocess_exec(turn_id, cmd, tracked=False)
                     result = {"status": "spawned_untracked", "note": f"Roamer dispatched to investigate '{target_host}'. Results will arrive in your inbox."}
-                return
 
             elif tool == "spawn_scribe":
                 mode = action.get("mode", "summarize")
