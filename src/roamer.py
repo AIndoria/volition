@@ -54,7 +54,8 @@ class SafeShell:
 
     FORBIDDEN_FLAGS = ["-i", "sudo", "su"]
     
-    HOSTNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_.-]+$")
+    # Hostnames must not start with '-' to avoid option injection in ssh-like commands.
+    HOSTNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$")
 
     def __init__(self, target_host="local"):
         if target_host != "local" and not self.HOSTNAME_PATTERN.match(str(target_host)):
