@@ -31,11 +31,11 @@ except ImportError:
 
 # --- CONFIGURATION ---
 # Default to local vLLM/Ollama/LlamaCpp
-DEFAULT_API_URL = os.environ.get("ROAMER_API_URL", "http://10.0.0.54:8000/v1") 
+DEFAULT_API_URL = os.environ.get("ROAMER_API_URL", "") 
 DEFAULT_API_KEY = os.environ.get("ROAMER_API_KEY", "volition-local")
 DEFAULT_MODEL = os.environ.get("MODEL_ROAMER", "qwen-2.5-14b-coder")
 
-DEFAULT_REDIS_URL = os.environ.get("REDIS_URL", "redis://:volition@10.0.0.175:6379/0")
+DEFAULT_REDIS_URL = os.environ.get("REDIS_URL", "")
 MAX_TURNS = 15
 
 # LOGGING
