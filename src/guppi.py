@@ -1529,6 +1529,12 @@ class GuppiDaemon:
             # Safely check for either env var without throwing a NameError
             api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
             actual_model = model_id
+            if not api_key:
+                logger.error("FATAL: No remote API key configured. Forcing hibernation.")
+                return {
+                    "reasoning": "Missing remote API credentials (OPENAI_API_KEY or OPENROUTER_API_KEY). I cannot think. Forcing hibernation.",
+                    "action": {"tool": "hibernate"}
+                }
             
         url = f"{base_url}/chat/completions"
         headers = {
