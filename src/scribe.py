@@ -95,6 +95,8 @@ async def run_llm_generation(model_name: str, prompt_text: str) -> str:
         base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
         # Safely check for either env var without throwing a NameError
         api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise RuntimeError("No remote API key configured. Scribe cannot run.")
         actual_model = model_id
         
     url = f"{base_url}/chat/completions"
@@ -185,7 +187,8 @@ async def main():
 
     # 3. Execute Task
     try:
-        if args.mode == "summarize":
+        # Group analyze with summarize so the LLM actually fires
+        if args.mode in ["summarize", "analyze"]:
             # Direct generation via configured provider
             result_text = await run_llm_generation(args.model, prompt_text)
             
