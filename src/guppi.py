@@ -1856,13 +1856,16 @@ You were asleep for: {time_str}
                     with tempfile.NamedTemporaryFile('w', delete=False) as pf:
                         pf.write(combined_content)
                         final_prompt_file = pf.name
-                    
+
+                    meta_dict = {"action_id": turn_id, "mode": mode}
+
                     cmd = [
                         sys.executable, str(BIN_DIR / "scribe.py"), 
                         "--model", model, 
                         "--prompt-file", final_prompt_file, 
                         "--output-inbox", f"inbox:{self.abe_name}",
-                        "--mode", mode
+                        "--mode", mode,
+                        "--meta", json.dumps(meta_dict)
                     ]
                     await self._spawn_subprocess_exec(turn_id, cmd, tracked=False)
                     result = {"status": "spawned_untracked", "note": "Scribe result will arrive in inbox"}
@@ -2027,7 +2030,8 @@ You were asleep for: {time_str}
         tools = {
             "shell": "Execute local shell command. Args: command",
             "remote_exec": "Execute remote SSH command. Args: host, command",
-            "spawn_scribe": "Spawn tasker process. Args: prompt, prompt_file (optional), model, mode (summarize|vectorize). NOTE: 'vectorize' offloads to GPU queue.",
+            "spawn_scribe": "Spawn a single-shot Scribe. Args: prompt, prompt_file (optional), mode (analyze|summarize|vectorize). GUPPI auto-routes the model. 'analyze' is for deep static analysis, 'summarize' compresses text, 'vectorize' offloads to GPU memory.",
+            "spawn_roamer": "Spawn a multi-turn, read-only Investigator. Args: directive, target_host (optional, default: local). Use to trace logs, map directories, or debug configs without burning your context. Returns a markdown report.",
             "rag_search": "Search vector memory. Args: query",
             "todo_list": "List tasks. Args: filter (due|upcoming|all)",
             "todo_add": "Add task. Args: task, priority, due",
