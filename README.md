@@ -79,8 +79,8 @@ Genesis creates exactly one Abe (abe-01). All other services are infrastructure.
 * Python 3.10+
 * OpenRouter API key (required for core reasoning) and/or Ollama (used by GPU Worker and Ear)
 
-  * For now guppi.py explicitly only uses Openrouter. My personal repo has some haphazarded llama.cpp/ollama vars, and I'd like to clear it out before I make it available.
-  * Ollama is available for social digest(ear), and summarization/embeddings(gpu-worker). However, openrouter can be used here too.
+  * As of 8.0 (Public 0.8) guppi.py uses either Openrouter or any OpenAI compatible endpoing (eg llama.cpp/ollama etc).
+  * Ollama is made available by default for social digest(ear), and summarization/embeddings(gpu-worker). However, openrouter/OpenAI compatible API endpoint can be used here too.
 
 ### Strongly Recommended
 
