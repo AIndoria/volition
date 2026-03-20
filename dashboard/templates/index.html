@@ -342,13 +342,28 @@
           () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
           [events]
         );
+        const dedupedEvents = useMemo(() => {
+          const seen = new Map();
+          // Process in reverse so "completed" (written later) is seen first
+          for (let i = events.length - 1; i >= 0; i--) {
+            try {
+              const entry = JSON.parse(events[i].data.entry || "{}");
+              const key = entry.id || events[i].id; // fallback to stream ID
+              if (!seen.has(key)) {
+                seen.set(key, events[i]);
+              }
+            } catch { continue; }
+          }
+          // Restore chronological order
+          return [...seen.values()].reverse();
+        }, [events]);
         return (
           <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
             <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1">
               Action Log
             </h2>
             <div className="flex-1 overflow-y-auto space-y-3 font-mono text-xs scrollbar-thin">
-              {events.map((e, i) => {
+              {dedupedEvents.map((e, i) => {
                 let entry = {};
                 try {
                   entry = JSON.parse(e.data.entry || "{}");
