@@ -24,6 +24,7 @@ REDIS_HOST = os.environ.get("REDIS_HOST")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "volition")
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
+HUMAN_NAME = os.environ.get("HUMAN_NAME", "Human-Abe")
 
 # --- APP SETUP ---
 app = FastAPI(title="Volition Command")
@@ -34,7 +35,7 @@ templates = Jinja2Templates(directory="templates")
 @app.get("/mobile", response_class=HTMLResponse)
 async def get_mobile(request: Request):
     """Force load the mobile interface."""
-    return templates.TemplateResponse("mobile.html", {"request": request})
+    return templates.TemplateResponse("mobile.html", {"request": request, "human_name": HUMAN_NAME})
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
@@ -44,13 +45,13 @@ async def get_dashboard(request: Request):
     Otherwise, serve the desktop dashboard.
     """
     user_agent = request.headers.get("user-agent", "").lower()
-    
+
     # "Automagic" detection
     if "mobile" in user_agent or "android" in user_agent or "iphone" in user_agent:
-        return templates.TemplateResponse("mobile.html", {"request": request})
-    
+        return templates.TemplateResponse("mobile.html", {"request": request, "human_name": HUMAN_NAME})
+
     # Fallback to desktop
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse("index.html", {"request": request, "human_name": HUMAN_NAME})
 
 # --- REDIS MANAGER ---
 class RedisManager:
@@ -79,7 +80,7 @@ class RedisManager:
         }
         await self.redis.xadd(channel, entry)
 
-    async def send_email(self, target: str, content: str, sender: str = "Human-Abe"):
+    async def send_email(self, target: str, content: str, sender: str = HUMAN_NAME):
         key = f"inbox:{target}"
         msg = {
             "from": sender,
@@ -299,7 +300,7 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 msg = json.loads(data)
                 action = msg.get("action")
-                sender = msg.get("sender", "Human-Abe") # Identity Support
+                sender = msg.get("sender", HUMAN_NAME)  # Identity Support
 
                 if action == "post":
                     channel = msg.get("channel")

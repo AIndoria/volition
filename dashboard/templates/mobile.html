@@ -68,6 +68,7 @@
     <div id="root"></div>
 
     <script type="text/babel">
+      const HUMAN_NAME = "{{ human_name }}";
       const { useState, useEffect, useRef, useMemo } = React;
       const formatTime = (iso) => {
         if (!iso) return "??:??";
@@ -126,7 +127,7 @@
                 {messages.map((m, i) => {
                     const data = m?.data || {};
                     const from = data.from || "Unknown";
-                    const isMe = from === identity || from === "Human-Abe" || from === "Human";
+                    const isMe = from === identity || from === HUMAN_NAME || from === "Human";
                     
                     return (
                         <div key={i} className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
@@ -330,7 +331,7 @@
 
       const App = () => {
         const [activeTab, setActiveTab] = useState("chat");
-        const [identity, setIdentity] = useState("Human-Abe");
+        const [identity, setIdentity] = useState(HUMAN_NAME);
         const [socket, setSocket] = useState(null);
         
         const [chats, setChats] = useState({});

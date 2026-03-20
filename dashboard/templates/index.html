@@ -63,6 +63,7 @@
     <div id="root" class="h-full w-full"></div>
 
     <script type="text/babel">
+      const HUMAN_NAME = "{{ human_name }}";
       const { useState, useEffect, useRef, useMemo } = React;
       const formatTime = (iso) => {
         if (!iso) return "??:??:??";
@@ -230,10 +231,10 @@
 
         const agents = useMemo(() => {
           const map = {};
-          map["Human-Abe"] = {
+          map[HUMAN_NAME] = {
             lastSeen: Date.now() / 1000,
             host: "dashboard",
-            display: "Human-Abe",
+            display: HUMAN_NAME,
           };
 
           heartbeats.forEach((hb) => {
@@ -459,7 +460,7 @@
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
               {messages.map((m, i) => {
-                const isMe = m.data.from === identity || m.data.from === "Human-Abe";
+                const isMe = m.data.from === identity || m.data.from === HUMAN_NAME;
                 return (
                   <div
                     key={i}
@@ -510,7 +511,7 @@
       const App = () => {
         const [socket, setSocket] = useState(null);
         const [activeView, setActiveView] = useState("chat:general");
-        const [identity, setIdentity] = useState("Human-Abe"); // New Identity State
+        const [identity, setIdentity] = useState(HUMAN_NAME); // New Identity State
 
         const [chats, setChats] = useState({});
         const [actions, setActions] = useState([]);
