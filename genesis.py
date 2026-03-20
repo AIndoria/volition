@@ -101,7 +101,7 @@ def run_cmd(cmd, shell=False, check=True):
         sys.exit(1)
 
 def prompt(text, default=None):
-    if default:
+    if default is not None:
         val = input(f"{GREEN}[?]{RESET} {text} [{default}]: ").strip()
         return val if val else default
     else:
