@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Volition Command</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
     <script>
       tailwind.config = {
         darkMode: "class",
@@ -29,6 +29,8 @@
       crossorigin
       src="https://unpkg.com/@babel/standalone/babel.min.js"
     ></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
     <style>
       body {
         background-color: #0d1117;
@@ -48,6 +50,13 @@
         background-color: #30363d;
         border-radius: 3px;
       }
+      .prose.prose-invert a { color: #58a6ff; }
+      .prose.prose-invert code { background: #21262d; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; }
+      .prose.prose-invert pre { background: #21262d; border: 1px solid #30363d; }
+      .prose.prose-invert pre code { background: transparent; padding: 0; }
+      .prose.prose-invert h1,
+      .prose.prose-invert h2,
+      .prose.prose-invert h3 { color: #e6edf3; }
     </style>
   </head>
   <body class="h-screen w-screen overflow-hidden flex flex-col">
@@ -194,9 +203,12 @@
                     </div>
                     <span>{formatTime(e.timestamp_intent)}</span>
                   </div>
-                  <div className="text-sm text-gray-200 whitespace-pre-wrap font-sans">
-                    {e.message}
-                  </div>
+                  <div
+                    className="text-sm text-gray-200 font-sans prose prose-invert prose-sm max-w-none"
+                    dangerouslySetInnerHTML={{
+                      __html: DOMPurify.sanitize(marked.parse(e.message || ""))
+                    }}
+                  />
                 </div>
               ))}
               {emails.length === 0 && (
