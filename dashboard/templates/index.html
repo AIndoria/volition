@@ -76,11 +76,19 @@
 
       // --- COMPONENTS ---
 
-      const EmailView = ({ actions, onSendEmail }) => {
+      const EmailView = ({ actions, onSendEmail, heartbeats }) => {
         const [filterFrom, setFilterFrom] = useState("");
         const [filterTo, setFilterTo] = useState("");
         const [composeTo, setComposeTo] = useState("");
         const [composeMsg, setComposeMsg] = useState("");
+
+        const agents = useMemo(() => {
+          const names = new Set();
+          (heartbeats || []).forEach(hb => {
+            if (hb.data?.abe) names.add(hb.data.abe);
+          });
+          return [...names].sort();
+        }, [heartbeats]);
 
         const emails = useMemo(() => {
           const seenIds = new Set();
@@ -167,12 +175,16 @@
 
             <div className="p-3 border-b border-gray-700 bg-gray-800/50">
               <form onSubmit={handleSend} className="flex gap-2">
-                <input
-                  placeholder="To: abe-xx"
+                <select
                   value={composeTo}
                   onChange={(e) => setComposeTo(e.target.value)}
                   className="w-32 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white"
-                />
+                >
+                  <option value="">To...</option>
+                  {agents.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
                 <input
                   placeholder="Message content..."
                   value={composeMsg}
@@ -673,7 +685,7 @@
 
             <div className="flex-1 flex flex-col min-w-0 py-2">
               {activeView === "emails" ? (
-                <EmailView actions={actions} onSendEmail={handleSendEmail} />
+                <EmailView actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />
               ) : (
                 <ChatWindow
                   channel={activeView}

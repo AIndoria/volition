@@ -203,10 +203,18 @@
           );
       };
 
-      const MobileUplink = ({ actions, onSendEmail }) => {
+      const MobileUplink = ({ actions, onSendEmail, heartbeats }) => {
           const [subTab, setSubTab] = useState("compose"); 
           const [to, setTo] = useState("");
           const [msg, setMsg] = useState("");
+
+          const agents = useMemo(() => {
+              const names = new Set();
+              (heartbeats || []).forEach(hb => {
+                  if (hb.data?.abe) names.add(hb.data.abe);
+              });
+              return [...names].sort();
+          }, [heartbeats]);
 
           const emails = useMemo(() => {
              const candidates = actions
@@ -253,8 +261,13 @@
                            <div className="bg-gray-800 border border-gray-700 p-4 rounded-lg space-y-4">
                                <h3 className="font-bold text-gray-400 uppercase tracking-widest text-xs">Secure Uplink</h3>
                                <div>
-                                   <label className="block text-xs text-gray-500 mb-1">To (comma separated)</label>
-                                   <input value={to} onChange={e=>setTo(e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white" placeholder="abe-01, abe-02" />
+                                   <label className="block text-xs text-gray-500 mb-1">To</label>
+                                   <select value={to} onChange={e=>setTo(e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white">
+                                       <option value="">Select recipient...</option>
+                                       {agents.map(name => (
+                                           <option key={name} value={name}>{name}</option>
+                                       ))}
+                                   </select>
                                </div>
                                <div>
                                    <label className="block text-xs text-gray-500 mb-1">Message</label>
@@ -449,7 +462,7 @@
                             identity={identity}
                         />
                     )}
-                    {activeTab === 'uplink' && <MobileUplink actions={actions} onSendEmail={handleSendEmail} />}
+                    {activeTab === 'uplink' && <MobileUplink actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />}
                     {activeTab === 'fleet' && <MobileFleet heartbeats={heartbeats} />}
                     {activeTab === 'activity' && <MobileActivity actions={actions} digests={digests} />}
                 </SafeRender>
