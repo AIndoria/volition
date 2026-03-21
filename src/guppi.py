@@ -106,7 +106,18 @@ REDIS_RETRY_BASE = float(os.environ.get("REDIS_RETRY_BASE", 0.5))
 DEFAULT_LOCK_TTL_MS = 60000 
 
 # Safety
-STREAM_DENY_LIST = ["volition:action_log", "volition:heartbeat", "volition:log_stream"]
+STREAM_DENY_LIST = ["volition:action_log", "volition:heartbeat", "volition:log_stream", "volition:token_usage"]
+
+CONTEXT_LIMITS = {
+    "google/gemini-3-flash-preview": 1_048_576,
+    "google/gemini-2.5-flash-preview": 1_048_576,
+    "google/gemini-2.5-pro-preview": 1_048_576,
+    "mistral": 32_768,
+    "qwen-2.5-14b-coder": 32_768,
+    "nanbeige-4.1-3b": 8_192,
+    "nomic-embed-text": 8_192,
+}
+DEFAULT_CONTEXT_LIMIT = 32_768
 FLASH_FORBIDDEN_TOOLS = {"shell", "write_file", "spawn_abe", "remote_exec", "spawn_scribe"}
 
 # Logging Setup
@@ -1652,9 +1663,30 @@ class GuppiDaemon:
                     return {"reasoning": f"API Error: {resp.status}", "action": {"tool": "hibernate"}}
                 
                 data = await resp.json()
+
+                # Token usage telemetry
+                usage = data.get("usage", {})
+                if usage:
+                    try:
+                        ctx_limit = CONTEXT_LIMITS.get(actual_model, DEFAULT_CONTEXT_LIMIT)
+                        total = usage.get("total_tokens", 0) or 0
+                        await self.r.xadd("volition:token_usage", {
+                            "source": "guppi",
+                            "agent": self.abe_name,
+                            "model": actual_model,
+                            "prompt_tokens": str(usage.get("prompt_tokens", 0) or 0),
+                            "completion_tokens": str(usage.get("completion_tokens", 0) or 0),
+                            "total_tokens": str(total),
+                            "context_limit": str(ctx_limit),
+                            "utilization_pct": f"{(total / ctx_limit) * 100:.1f}",
+                            "ts": datetime.utcnow().isoformat()
+                        })
+                    except Exception:
+                        pass
+
                 choice = data["choices"][0]
                 message = choice["message"]
-                
+
                 text = message.get("content", "")
                 
                 # 1. Grab native reasoning content (o1 / llama.cpp style)

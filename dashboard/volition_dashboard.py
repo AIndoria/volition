@@ -154,7 +154,8 @@ async def redis_listener():
         "chat:synchronous": "$",
         "volition:action_log": "$",
         "volition:heartbeat": "$",
-        "volition:social_digests": "$"
+        "volition:social_digests": "$",
+        "volition:token_usage": "$"
     }
 
     last_scan = 0

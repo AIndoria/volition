@@ -55,6 +55,13 @@ HEARTBEAT_TTL = 300             # How long to remember an Abe after last heartbe
 # v7.0 Stream Key
 DIGEST_STREAM_KEY = "volition:social_digests"
 
+CONTEXT_LIMITS = {
+    "google/gemini-3-flash-preview": 1_048_576,
+    "google/gemini-2.5-flash-preview": 1_048_576,
+    "mistral": 32_768,
+}
+DEFAULT_CONTEXT_LIMIT = 32_768
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [EAR] - %(levelname)s - %(message)s'
@@ -111,6 +118,25 @@ class SocialRouter:
             async with session.post(f"{OLLAMA_URL}/generate", json=payload) as resp:
                 if resp.status == 200:
                     data = await resp.json()
+                    try:
+                        prompt_toks = data.get("prompt_eval_count", 0) or 0
+                        comp_toks = data.get("eval_count", 0) or 0
+                        total = prompt_toks + comp_toks
+                        if total > 0:
+                            ctx_limit = CONTEXT_LIMITS.get(MODEL_SUMMARIZE, DEFAULT_CONTEXT_LIMIT)
+                            await self.r.xadd("volition:token_usage", {
+                                "source": "ear",
+                                "agent": "ear",
+                                "model": MODEL_SUMMARIZE,
+                                "prompt_tokens": str(prompt_toks),
+                                "completion_tokens": str(comp_toks),
+                                "total_tokens": str(total),
+                                "context_limit": str(ctx_limit),
+                                "utilization_pct": f"{(total / ctx_limit) * 100:.1f}",
+                                "ts": datetime.utcnow().isoformat()
+                            })
+                    except Exception:
+                        pass
                     return data.get("response")
                 else:
                     logger.error(f"Ollama summary failed: {resp.status}")
@@ -119,7 +145,7 @@ class SocialRouter:
         return None
     
 
-    async def generate_summary_openrouter(session, conversation_text):
+    async def generate_summary_openrouter(self, session, conversation_text):
         if not OPENROUTER_API_KEY:
             logger.error("OPENROUTER_API_KEY not set for OpenRouter summarize")
             return None
@@ -153,6 +179,24 @@ class SocialRouter:
                     return None
 
                 data = await resp.json()
+                usage = data.get("usage", {})
+                if usage:
+                    try:
+                        ctx_limit = CONTEXT_LIMITS.get(OPENROUTER_MODEL_SUMMARIZE, DEFAULT_CONTEXT_LIMIT)
+                        total = usage.get("total_tokens", 0) or 0
+                        await self.r.xadd("volition:token_usage", {
+                            "source": "ear",
+                            "agent": "ear",
+                            "model": OPENROUTER_MODEL_SUMMARIZE,
+                            "prompt_tokens": str(usage.get("prompt_tokens", 0) or 0),
+                            "completion_tokens": str(usage.get("completion_tokens", 0) or 0),
+                            "total_tokens": str(total),
+                            "context_limit": str(ctx_limit),
+                            "utilization_pct": f"{(total / ctx_limit) * 100:.1f}",
+                            "ts": datetime.utcnow().isoformat()
+                        })
+                    except Exception:
+                        pass
                 return data["choices"][0]["message"]["content"]
 
         except Exception as e:
