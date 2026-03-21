@@ -218,9 +218,7 @@
                   </div>
                   <div
                     className="text-sm text-gray-200 font-sans prose prose-invert prose-sm max-w-none"
-                    dangerouslySetInnerHTML={{
-                      __html: DOMPurify.sanitize(marked.parse(e.message || ""))
-                    }}
+                    dangerouslySetInnerHTML={{% raw %}{ __html: DOMPurify.sanitize(marked.parse(e.message || "")) }{% endraw %}}
                   />
                 </div>
               ))}
