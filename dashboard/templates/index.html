@@ -318,7 +318,7 @@
               <span className="text-[10px] opacity-50">{entries.length}</span>
             </h2>
             <div className="flex-1 overflow-y-auto space-y-1 font-mono scrollbar-thin">
-              {entries.slice().reverse().map((e, i) => {
+              {entries.map((e, i) => {
                 const d = e.data || {};
                 const pct = parseFloat(d.utilization_pct || 0);
                 const total = parseInt(d.total_tokens || 0);
