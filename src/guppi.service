@@ -1,0 +1,19 @@
+[Unit]
+Description=Volition GUPPI Agent Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root
+ExecStart=/root/venv/bin/python /root/bin/guppi.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+Nice=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
