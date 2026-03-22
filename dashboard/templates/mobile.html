@@ -82,7 +82,7 @@
       const formatTime = (iso) => {
         if (!iso) return "??:??";
         try {
-          return iso.split("T")[1].substring(0, 5); 
+          return new Date(iso + "Z").toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', hour12: false});
         } catch {
           return new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         }
