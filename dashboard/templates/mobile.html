@@ -264,7 +264,7 @@
                                   </div>
                                   <div
                                      className="text-sm text-gray-200 font-sans prose prose-invert prose-sm max-w-none"
-                                     dangerouslySetInnerHTML={{% raw %}{{ __html: DOMPurify.sanitize(marked.parse(e.action.message || "")) }}{% endraw %}}
+                                     dangerouslySetInnerHTML={% raw %}{{ __html: DOMPurify.sanitize(marked.parse(e.action.message || "")) }}{% endraw %}
                                   />
                                </div>
                            ))}
@@ -329,7 +329,7 @@
                                   <div className="flex-1 bg-gray-700 rounded-full h-1.5">
                                       <div
                                           className={`h-1.5 rounded-full ${utilizationColor(pct)}`}
-                                          style={{% raw %}{{ width: `${Math.min(pct, 100)}%` }}{% endraw %}}
+                                          style={% raw %}{{ width: `${Math.min(pct, 100)}%` }}{% endraw %}
                                       />
                                   </div>
                                   <span className="text-gray-300 whitespace-nowrap text-[10px]">
