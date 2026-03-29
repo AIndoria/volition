@@ -595,78 +595,112 @@
         const [showDigests, setShowDigests] = useState(true);
         const [showTokens, setShowTokens] = useState(true);
         const [tokenUsage, setTokenUsage] = useState([]);
+        const [connected, setConnected] = useState(false);
 
         useEffect(() => {
-          const ws = new WebSocket(`ws://${window.location.host}/ws`);
+          let ws = null;
+          let backoff = 1000;
+          let destroyed = false;
 
-          ws.onopen = () => console.log("Connected to Volition");
+          const connect = () => {
+            if (destroyed) return;
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
 
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(event.data);
+            ws.onopen = () => {
+              console.log("Connected to Volition");
+              setConnected(true);
+              backoff = 1000;
+              // Clear stale state so fresh history from server replaces it
+              setChats({});
+              setActions([]);
+              setDigests([]);
+              setTokenUsage([]);
+              setHeartbeats([]);
+              setSocket(ws);
+            };
 
-              if (msg.type === "channel_discovery") {
-                setChannels((prev) => {
-                  if (prev.includes(msg.channel)) return prev;
-                  const others = [...prev, msg.channel]
-                    .filter(
-                      (c) => c !== "chat:general" && c !== "chat:synchronous"
-                    )
-                    .sort();
-                  return ["chat:general", "chat:synchronous", ...others];
-                });
-              } else if (msg.type === "stream_event") {
-                if (msg.stream.startsWith("chat:")) {
-                  setChats((prev) => ({
-                    ...prev,
-                    [msg.stream]: [...(prev[msg.stream] || []), msg].sort(
-                      (a, b) =>
-                        (a.data.timestamp || "").localeCompare(
-                          b.data.timestamp || ""
-                        )
-                    ),
-                  }));
-                }
-                if (msg.stream === "volition:action_log") {
-                  setActions((prev) => {
-                    const exists = prev.some((p) => p.id === msg.id);
-                    if (exists) return prev;
-                    
-                    // Sort AND Slice to keep only the last 100
-                    const sorted = [...prev, msg].sort((a, b) => {
-                      const ta = JSON.parse(a.data.entry || "{}").timestamp_intent || "";
-                      const tb = JSON.parse(b.data.entry || "{}").timestamp_intent || "";
-                      return ta.localeCompare(tb);
-                    });
-                    
-                    return sorted.slice(-200);
-                  });
-                }
-                if (msg.stream === "volition:social_digests") {
-                    setDigests((prev) => {
-                        const exists = prev.some((p) => p.id === msg.id);
-                        if (exists) return prev;
-                        // Sort by generated_at
-                        return [...prev, msg].sort((a, b) => 
-                            (a.data.generated_at || "").localeCompare(b.data.generated_at || "")
-                        );
-                    });
-                }
-                if (msg.stream === "volition:token_usage") {
-                    setTokenUsage((prev) => [...prev.slice(-200), msg]);
-                }
-                if (msg.stream === "volition:heartbeat") {
-                  setHeartbeats((prev) => {
-                    return [...prev.slice(-100), msg];
-                  });
-                }
+            ws.onclose = () => {
+              setConnected(false);
+              setSocket(null);
+              if (!destroyed) {
+                setTimeout(connect, backoff);
+                backoff = Math.min(backoff * 2, 30000);
               }
-            } catch (e) {
-              console.error("Parse error on WS message:", e);
-            }
+            };
+
+            ws.onerror = () => ws.close();
+
+            ws.onmessage = (event) => {
+              try {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === "channel_discovery") {
+                  setChannels((prev) => {
+                    if (prev.includes(msg.channel)) return prev;
+                    const others = [...prev, msg.channel]
+                      .filter(
+                        (c) => c !== "chat:general" && c !== "chat:synchronous"
+                      )
+                      .sort();
+                    return ["chat:general", "chat:synchronous", ...others];
+                  });
+                } else if (msg.type === "stream_event") {
+                  if (msg.stream.startsWith("chat:")) {
+                    setChats((prev) => ({
+                      ...prev,
+                      [msg.stream]: [...(prev[msg.stream] || []), msg].sort(
+                        (a, b) =>
+                          (a.data.timestamp || "").localeCompare(
+                            b.data.timestamp || ""
+                          )
+                      ),
+                    }));
+                  }
+                  if (msg.stream === "volition:action_log") {
+                    setActions((prev) => {
+                      const exists = prev.some((p) => p.id === msg.id);
+                      if (exists) return prev;
+
+                      // Sort AND Slice to keep only the last 100
+                      const sorted = [...prev, msg].sort((a, b) => {
+                        const ta = JSON.parse(a.data.entry || "{}").timestamp_intent || "";
+                        const tb = JSON.parse(b.data.entry || "{}").timestamp_intent || "";
+                        return ta.localeCompare(tb);
+                      });
+
+                      return sorted.slice(-200);
+                    });
+                  }
+                  if (msg.stream === "volition:social_digests") {
+                      setDigests((prev) => {
+                          const exists = prev.some((p) => p.id === msg.id);
+                          if (exists) return prev;
+                          // Sort by generated_at
+                          return [...prev, msg].sort((a, b) =>
+                              (a.data.generated_at || "").localeCompare(b.data.generated_at || "")
+                          );
+                      });
+                  }
+                  if (msg.stream === "volition:token_usage") {
+                      setTokenUsage((prev) => [...prev.slice(-200), msg]);
+                  }
+                  if (msg.stream === "volition:heartbeat") {
+                    setHeartbeats((prev) => {
+                      return [...prev.slice(-100), msg];
+                    });
+                  }
+                }
+              } catch (e) {
+                console.error("Parse error on WS message:", e);
+              }
+            };
           };
-          setSocket(ws);
-          return () => ws.close();
+
+          connect();
+          return () => {
+            destroyed = true;
+            if (ws) ws.close();
+          };
         }, []);
 
         const handleSendChat = (channel, content) => {
@@ -692,7 +726,13 @@
         };
 
         return (
-          <div className="flex h-full bg-[#0d1117]">
+          <div className="flex flex-col h-full bg-[#0d1117]">
+            {!connected && (
+              <div className="bg-yellow-900/80 text-yellow-300 text-xs text-center py-1 tracking-widest font-bold shrink-0">
+                ⟳ RECONNECTING...
+              </div>
+            )}
+            <div className="flex flex-1 min-h-0">
             <div className="flex flex-col w-64 glass-panel m-2 rounded-lg border-r border-gray-800">
               <div className="p-4 text-xl font-bold text-white tracking-widest border-b border-gray-800 text-center bg-gray-900/50 rounded-t-lg">
                 VOLITION
@@ -804,6 +844,7 @@
                     </div>
                   );
                })()}
+            </div>
             </div>
           </div>
         );

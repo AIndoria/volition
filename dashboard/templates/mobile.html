@@ -427,48 +427,79 @@
         const [connected, setConnected] = useState(false);
 
         useEffect(() => {
-          const ws = new WebSocket(`ws://${window.location.host}/ws`);
-          ws.onopen = () => setConnected(true);
-          ws.onclose = () => setConnected(false);
+          let ws = null;
+          let backoff = 1000;
+          let destroyed = false;
 
-          ws.onmessage = (event) => {
-             try {
-                 const msg = JSON.parse(event.data);
-                 if (msg.type === "channel_discovery") {
-                     setChannels(prev => prev.includes(msg.channel) ? prev : [...prev, msg.channel].sort());
-                 }
-                 else if (msg.type === "stream_event") {
-                     if (msg.stream.startsWith("chat:")) {
-                         setChats(prev => ({
-                             ...prev,
-                             [msg.stream]: [...(prev[msg.stream] || []), msg].sort((a,b) => (a.data.timestamp||"").localeCompare(b.data.timestamp||""))
-                         }));
-                     }
-                     else if (msg.stream === "volition:action_log") {
-                         setActions(prev => {
-                             if (prev.some(p => p.id === msg.id)) return prev;
-                             return [...prev, msg].sort((a,b) => {
-                                 const ta = JSON.parse(a.data.entry||"{}").timestamp_intent || "";
-                                 const tb = JSON.parse(b.data.entry||"{}").timestamp_intent || "";
-                                 return tb.localeCompare(ta); 
-                             }).slice(0, 50); 
-                         });
-                     }
-                     else if (msg.stream === "volition:social_digests") {
-                         setDigests(prev => [...prev.filter(p=>p.id!==msg.id), msg].sort((a,b) => (b.data.generated_at||"").localeCompare(a.data.generated_at||"")).slice(0,20));
-                     }
-                     else if (msg.stream === "volition:token_usage") {
-                         setTokenUsage(prev => [...prev.slice(-200), msg]);
-                     }
-                     else if (msg.stream === "volition:heartbeat") {
-                         setHeartbeats(prev => [...prev.slice(-50), msg]);
-                     }
-                 }
-             } catch(e) { console.error(e); }
+          const connect = () => {
+            if (destroyed) return;
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
+
+            ws.onopen = () => {
+              setConnected(true);
+              backoff = 1000;
+              // Clear stale state so fresh history from server replaces it
+              setChats({});
+              setActions([]);
+              setDigests([]);
+              setTokenUsage([]);
+              setHeartbeats([]);
+              setSocket(ws);
+            };
+
+            ws.onclose = () => {
+              setConnected(false);
+              setSocket(null);
+              if (!destroyed) {
+                setTimeout(connect, backoff);
+                backoff = Math.min(backoff * 2, 30000);
+              }
+            };
+
+            ws.onerror = () => ws.close();
+
+            ws.onmessage = (event) => {
+               try {
+                   const msg = JSON.parse(event.data);
+                   if (msg.type === "channel_discovery") {
+                       setChannels(prev => prev.includes(msg.channel) ? prev : [...prev, msg.channel].sort());
+                   }
+                   else if (msg.type === "stream_event") {
+                       if (msg.stream.startsWith("chat:")) {
+                           setChats(prev => ({
+                               ...prev,
+                               [msg.stream]: [...(prev[msg.stream] || []), msg].sort((a,b) => (a.data.timestamp||"").localeCompare(b.data.timestamp||""))
+                           }));
+                       }
+                       else if (msg.stream === "volition:action_log") {
+                           setActions(prev => {
+                               if (prev.some(p => p.id === msg.id)) return prev;
+                               return [...prev, msg].sort((a,b) => {
+                                   const ta = JSON.parse(a.data.entry||"{}").timestamp_intent || "";
+                                   const tb = JSON.parse(b.data.entry||"{}").timestamp_intent || "";
+                                   return tb.localeCompare(ta);
+                               }).slice(0, 50);
+                           });
+                       }
+                       else if (msg.stream === "volition:social_digests") {
+                           setDigests(prev => [...prev.filter(p=>p.id!==msg.id), msg].sort((a,b) => (b.data.generated_at||"").localeCompare(a.data.generated_at||"")).slice(0,20));
+                       }
+                       else if (msg.stream === "volition:token_usage") {
+                           setTokenUsage(prev => [...prev.slice(-200), msg]);
+                       }
+                       else if (msg.stream === "volition:heartbeat") {
+                           setHeartbeats(prev => [...prev.slice(-50), msg]);
+                       }
+                   }
+               } catch(e) { console.error(e); }
+            };
           };
 
-          setSocket(ws);
-          return () => ws.close();
+          connect();
+          return () => {
+            destroyed = true;
+            if (ws) ws.close();
+          };
         }, []);
 
         const handleSendChat = (channel, content) => {
