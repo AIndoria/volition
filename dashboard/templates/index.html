@@ -136,7 +136,7 @@
           } else if (e.key === "ArrowUp") {
             e.preventDefault();
             setSelectedIndex(i => (i - 1 + filteredAgents.length) % filteredAgents.length);
-          } else if (e.key === "Enter") {
+          } else if (e.key === "Enter" || e.key === "Tab") {
             e.preventDefault();
             handleSelect(filteredAgents[selectedIndex]);
           } else if (e.key === "Escape") {
