@@ -250,12 +250,15 @@
           });
         }, [actions, filterFrom, filterTo]);
 
+        useEffect(() => {
+          if (composeMsgRef.current) autoResize(composeMsgRef.current);
+        }, [composeMsg]);
+
         const handleSend = (e) => {
           e.preventDefault();
           if (!composeTo || !composeMsg) return;
           onSendEmail(composeTo, composeMsg);
           setComposeMsg("");
-          if (composeMsgRef.current) { composeMsgRef.current.style.height = "auto"; }
         };
 
         const handleEmailKeyDown = (e) => {
@@ -265,6 +268,13 @@
               e.preventDefault();
               handleSend(e);
             }
+          } else if (e.key === "Enter" && e.shiftKey) {
+            e.preventDefault();
+            const el = composeMsgRef.current;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            setComposeMsg(prev => prev.slice(0, start) + "\n" + prev.slice(end));
+            requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
           } else {
             emailMention.handleKeyDown(e);
           }
@@ -313,7 +323,7 @@
                   ref={composeMsgRef}
                   placeholder="Message content..."
                   value={composeMsg}
-                  onChange={(e) => { setComposeMsg(e.target.value); emailMention.handleInputChange(e); autoResize(e.target); }}
+                  onChange={(e) => { setComposeMsg(e.target.value); emailMention.handleInputChange(e); }}
                   onKeyDown={handleEmailKeyDown}
                   className="flex-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white resize-none overflow-hidden max-h-32"
                 />
@@ -640,12 +650,15 @@
 
         const mention = useAtMention(agents, inputRef, setInput);
 
+        useEffect(() => {
+          if (inputRef.current) autoResize(inputRef.current);
+        }, [input]);
+
         const handleSubmit = (e) => {
           e.preventDefault();
           if (!input.trim()) return;
           onSend(channel, input);
           setInput("");
-          if (inputRef.current) { inputRef.current.style.height = "auto"; }
         };
 
         const handleKeyDown = (e) => {
@@ -655,6 +668,13 @@
               e.preventDefault();
               handleSubmit(e);
             }
+          } else if (e.key === "Enter" && e.shiftKey) {
+            e.preventDefault();
+            const el = inputRef.current;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            setInput(prev => prev.slice(0, start) + "\n" + prev.slice(end));
+            requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
           } else {
             mention.handleKeyDown(e);
           }
@@ -717,7 +737,7 @@
                 rows="1"
                 ref={inputRef}
                 value={input}
-                onChange={(e) => { setInput(e.target.value); mention.handleInputChange(e); autoResize(e.target); }}
+                onChange={(e) => { setInput(e.target.value); mention.handleInputChange(e); }}
                 onKeyDown={handleKeyDown}
                 className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500 transition-colors resize-none overflow-hidden max-h-32"
                 placeholder={`Message #${displayChannel} as ${identity}...`}

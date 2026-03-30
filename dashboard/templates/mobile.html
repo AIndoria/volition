@@ -239,12 +239,15 @@
              if (bottomRef.current) bottomRef.current.scrollIntoView();
         }, [messages]);
 
+        useEffect(() => {
+          if (inputRef.current) autoResize(inputRef.current);
+        }, [input]);
+
         const handleSubmit = (e) => {
           e.preventDefault();
           if (!input.trim()) return;
           onSend(channel, input);
           setInput("");
-          if (inputRef.current) { inputRef.current.style.height = "auto"; }
         };
 
         const handleKeyDown = (e) => {
@@ -254,6 +257,13 @@
               e.preventDefault();
               handleSubmit(e);
             }
+          } else if (e.key === "Enter" && e.shiftKey) {
+            e.preventDefault();
+            const el = inputRef.current;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            setInput(prev => prev.slice(0, start) + "\n" + prev.slice(end));
+            requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
           } else {
             mention.handleKeyDown(e);
           }
@@ -292,7 +302,7 @@
                         className="flex-1 bg-gray-900 border border-gray-700 rounded-2xl px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500 resize-none overflow-hidden max-h-32"
                         placeholder={`Message #${channel.replace("chat:", "")}...`}
                         value={input}
-                        onChange={e => { setInput(e.target.value); mention.handleInputChange(e); autoResize(e.target); }}
+                        onChange={e => { setInput(e.target.value); mention.handleInputChange(e); }}
                         onKeyDown={handleKeyDown}
                      />
                      <button type="submit" className="bg-blue-600 text-white rounded-full p-2.5 flex items-center justify-center">
