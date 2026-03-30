@@ -74,6 +74,97 @@
         }
       };
 
+      // --- @MENTION AUTOCOMPLETE ---
+
+      const useAtMention = (agents, inputRef, setValue) => {
+        const [showPopup, setShowPopup] = React.useState(false);
+        const [query, setQuery] = React.useState("");
+        const [selectedIndex, setSelectedIndex] = React.useState(0);
+        const [mentionStart, setMentionStart] = React.useState(-1);
+
+        const filteredAgents = React.useMemo(() => {
+          if (!showPopup) return [];
+          return agents.filter(a => a.toLowerCase().startsWith(query.toLowerCase()));
+        }, [agents, query, showPopup]);
+
+        const dismissPopup = React.useCallback(() => {
+          setShowPopup(false);
+          setQuery("");
+          setSelectedIndex(0);
+          setMentionStart(-1);
+        }, []);
+
+        const handleSelect = React.useCallback((agentName) => {
+          const el = inputRef.current;
+          if (!el) return;
+          const val = el.value;
+          const cursor = el.selectionStart;
+          const newVal = val.slice(0, mentionStart) + "@" + agentName + " " + val.slice(cursor);
+          setValue(newVal);
+          dismissPopup();
+          requestAnimationFrame(() => {
+            const pos = mentionStart + agentName.length + 2;
+            el.setSelectionRange(pos, pos);
+            el.focus();
+          });
+        }, [inputRef, mentionStart, setValue, dismissPopup]);
+
+        const handleInputChange = React.useCallback((e) => {
+          const val = e.target.value;
+          const cursor = e.target.selectionStart;
+          let atPos = -1;
+          for (let i = cursor - 1; i >= 0; i--) {
+            if (val[i] === " " || val[i] === "\n") break;
+            if (val[i] === "@") { atPos = i; break; }
+          }
+          if (atPos !== -1) {
+            const q = val.slice(atPos + 1, cursor);
+            setMentionStart(atPos);
+            setQuery(q);
+            setShowPopup(true);
+            setSelectedIndex(0);
+          } else {
+            dismissPopup();
+          }
+        }, [dismissPopup]);
+
+        const handleKeyDown = React.useCallback((e) => {
+          if (!showPopup || filteredAgents.length === 0) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setSelectedIndex(i => (i + 1) % filteredAgents.length);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setSelectedIndex(i => (i - 1 + filteredAgents.length) % filteredAgents.length);
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            handleSelect(filteredAgents[selectedIndex]);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            dismissPopup();
+          }
+        }, [showPopup, filteredAgents, selectedIndex, handleSelect, dismissPopup]);
+
+        return { popupVisible: showPopup && filteredAgents.length > 0, filteredAgents, selectedIndex, handleInputChange, handleKeyDown, handleSelect, dismissPopup };
+      };
+
+      const MentionPopup = ({ visible, agents, selectedIndex, onSelect }) => {
+        if (!visible) return null;
+        return (
+          <div className="absolute bottom-full left-0 mb-1 w-56 max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg z-50">
+            {agents.map((name, i) => (
+              <div
+                key={name}
+                onMouseDown={(e) => { e.preventDefault(); onSelect(name); }}
+                className={`px-3 py-1.5 text-sm cursor-pointer ${i === selectedIndex ? "bg-blue-600 text-white" : "text-gray-300 hover:bg-gray-700"}`}
+              >
+                @{name}
+              </div>
+            ))}
+          </div>
+        );
+      };
+
       // --- COMPONENTS ---
 
       const EmailView = ({ actions, onSendEmail, heartbeats }) => {
@@ -89,6 +180,9 @@
           });
           return [...names].sort();
         }, [heartbeats]);
+
+        const composeMsgRef = useRef(null);
+        const emailMention = useAtMention(agents, composeMsgRef, setComposeMsg);
 
         const emails = useMemo(() => {
           const seenIds = new Set();
@@ -174,7 +268,8 @@
             </div>
 
             <div className="p-3 border-b border-gray-700 bg-gray-800/50">
-              <form onSubmit={handleSend} className="flex gap-2">
+              <form onSubmit={handleSend} className="flex gap-2 relative">
+                <MentionPopup visible={emailMention.popupVisible} agents={emailMention.filteredAgents} selectedIndex={emailMention.selectedIndex} onSelect={emailMention.handleSelect} />
                 <select
                   value={composeTo}
                   onChange={(e) => setComposeTo(e.target.value)}
@@ -186,9 +281,11 @@
                   ))}
                 </select>
                 <input
+                  ref={composeMsgRef}
                   placeholder="Message content..."
                   value={composeMsg}
-                  onChange={(e) => setComposeMsg(e.target.value)}
+                  onChange={(e) => { setComposeMsg(e.target.value); emailMention.handleInputChange(e); }}
+                  onKeyDown={emailMention.handleKeyDown}
                   className="flex-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white"
                 />
                 <button
@@ -497,13 +594,22 @@
         );
       };
 
-      const ChatWindow = ({ channel, messages, onSend, identity }) => {
+      const ChatWindow = ({ channel, messages, onSend, identity, heartbeats }) => {
         const [input, setInput] = useState("");
         const bottomRef = useRef(null);
+        const inputRef = useRef(null);
         useEffect(
           () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
           [messages]
         );
+
+        const agents = useMemo(() => {
+          const names = new Set();
+          (heartbeats || []).forEach(hb => { if (hb.data?.abe) names.add(hb.data.abe); });
+          return [...names].sort();
+        }, [heartbeats]);
+
+        const mention = useAtMention(agents, inputRef, setInput);
 
         const handleSubmit = (e) => {
           e.preventDefault();
@@ -562,12 +668,15 @@
             </div>
             <form
               onSubmit={handleSubmit}
-              className="p-3 border-t border-gray-700"
+              className="p-3 border-t border-gray-700 relative"
             >
+              <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} />
               <input
                 type="text"
+                ref={inputRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => { setInput(e.target.value); mention.handleInputChange(e); }}
+                onKeyDown={mention.handleKeyDown}
                 className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500 transition-colors"
                 placeholder={`Message #${displayChannel} as ${identity}...`}
               />
@@ -793,6 +902,7 @@
                   messages={chats[activeView] || []}
                   onSend={handleSendChat}
                   identity={identity}
+                  heartbeats={heartbeats}
                 />
               )}
             </div>
