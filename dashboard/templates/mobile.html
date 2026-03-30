@@ -227,6 +227,7 @@
           }, [heartbeats]);
 
           const emails = useMemo(() => {
+             const seenIds = new Set();
              const candidates = actions
                 .filter(a => {
                     try {
@@ -236,10 +237,15 @@
                 })
                 .map(a => {
                     const e = JSON.parse(a.data.entry);
-                    return { ...e, timestamp: e.timestamp_intent };
+                    return { ...e, streamId: a.id, timestamp: e.timestamp_intent };
                 })
                 .sort((a,b) => (b.timestamp||"").localeCompare(a.timestamp||""));
-             return candidates;
+             return candidates.filter(e => {
+                 const key = e.id || `${e.timestamp_intent}-${e.action?.message}-${e.streamId}`;
+                 if (seenIds.has(key)) return false;
+                 seenIds.add(key);
+                 return true;
+             });
           }, [actions]);
 
           const handleSend = (e) => {
