@@ -167,10 +167,19 @@
         el.style.height = el.scrollHeight + "px";
       };
 
-      const MentionPopup = ({ visible, agents, selectedIndex, onSelect }) => {
+      const MentionPopup = ({ visible, agents, selectedIndex, onSelect, anchorRef }) => {
+        const [coords, setCoords] = React.useState({ top: 0, left: 0, width: 224 });
+        React.useLayoutEffect(() => {
+          if (!visible || !anchorRef?.current) return;
+          const r = anchorRef.current.getBoundingClientRect();
+          setCoords({ top: r.top + window.scrollY, left: r.left + window.scrollX, width: r.width });
+        }, [visible, anchorRef]);
         if (!visible) return null;
-        return (
-          <div className="absolute bottom-full left-0 mb-1 w-56 max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg z-50">
+        return ReactDOM.createPortal(
+          <div
+            style={{ position: "absolute", top: coords.top - 4, left: coords.left, width: coords.width, transform: "translateY(-100%)", zIndex: 9999 }}
+            className="max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg"
+          >
             {agents.map((name, i) => (
               <div
                 key={name}
@@ -180,7 +189,8 @@
                 @{name}
               </div>
             ))}
-          </div>
+          </div>,
+          document.body
         );
       };
 
@@ -275,7 +285,7 @@
              
              <div className="p-2 bg-gray-800 border-t border-gray-700">
                  <form onSubmit={handleSubmit} className="flex gap-2 relative">
-                     <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} />
+                     <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} anchorRef={inputRef} />
                      <textarea
                         rows="1"
                         ref={inputRef}
@@ -415,7 +425,7 @@
                                </div>
                                <div className="relative">
                                    <label className="block text-xs text-gray-500 mb-1">Message</label>
-                                   <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} />
+                                   <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} anchorRef={msgRef} />
                                    <textarea ref={msgRef} value={msg} onChange={e=>{ setMsg(e.target.value); mention.handleInputChange(e); }} onKeyDown={mention.handleKeyDown} className="w-full h-32 bg-gray-900 border border-gray-600 rounded p-2 text-white" placeholder="Direct command..." />
                                </div>
                                <button onClick={handleSend} className="w-full bg-blue-600 text-white font-bold py-3 rounded hover:bg-blue-500">SEND UPLINK</button>

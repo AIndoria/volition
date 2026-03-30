@@ -153,10 +153,19 @@
         el.style.height = el.scrollHeight + "px";
       };
 
-      const MentionPopup = ({ visible, agents, selectedIndex, onSelect }) => {
+      const MentionPopup = ({ visible, agents, selectedIndex, onSelect, anchorRef }) => {
+        const [coords, setCoords] = React.useState({ top: 0, left: 0, width: 224 });
+        React.useLayoutEffect(() => {
+          if (!visible || !anchorRef?.current) return;
+          const r = anchorRef.current.getBoundingClientRect();
+          setCoords({ top: r.top + window.scrollY, left: r.left + window.scrollX, width: r.width });
+        }, [visible, anchorRef]);
         if (!visible) return null;
-        return (
-          <div className="absolute bottom-full left-0 mb-1 w-56 max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg z-50">
+        return ReactDOM.createPortal(
+          <div
+            style={{ position: "absolute", top: coords.top - 4, left: coords.left, width: coords.width, transform: "translateY(-100%)", zIndex: 9999 }}
+            className="max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg"
+          >
             {agents.map((name, i) => (
               <div
                 key={name}
@@ -166,7 +175,8 @@
                 @{name}
               </div>
             ))}
-          </div>
+          </div>,
+          document.body
         );
       };
 
@@ -287,7 +297,7 @@
 
             <div className="p-3 border-b border-gray-700 bg-gray-800/50">
               <form onSubmit={handleSend} className="flex gap-2 relative">
-                <MentionPopup visible={emailMention.popupVisible} agents={emailMention.filteredAgents} selectedIndex={emailMention.selectedIndex} onSelect={emailMention.handleSelect} />
+                <MentionPopup visible={emailMention.popupVisible} agents={emailMention.filteredAgents} selectedIndex={emailMention.selectedIndex} onSelect={emailMention.handleSelect} anchorRef={composeMsgRef} />
                 <select
                   value={composeTo}
                   onChange={(e) => setComposeTo(e.target.value)}
@@ -702,7 +712,7 @@
               onSubmit={handleSubmit}
               className="p-3 border-t border-gray-700 relative"
             >
-              <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} />
+              <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} anchorRef={inputRef} />
               <textarea
                 rows="1"
                 ref={inputRef}
