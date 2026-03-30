@@ -163,7 +163,7 @@
       };
 
       const autoResize = (el) => {
-        el.style.height = "auto";
+        el.style.height = "0";
         el.style.height = el.scrollHeight + "px";
       };
 
@@ -175,9 +175,10 @@
           setCoords({ top: r.top + window.scrollY, left: r.left + window.scrollX, width: r.width });
         }, [visible, anchorRef]);
         if (!visible) return null;
+        const popupStyle = { position: "absolute", top: coords.top - 4, left: coords.left, width: coords.width, transform: "translateY(-100%)", zIndex: 9999 };
         return ReactDOM.createPortal(
           <div
-            style={{ position: "absolute", top: coords.top - 4, left: coords.left, width: coords.width, transform: "translateY(-100%)", zIndex: 9999 }}
+            style={popupStyle}
             className="max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg"
           >
             {agents.map((name, i) => (
@@ -234,14 +235,19 @@
         }, [heartbeats]);
 
         const mention = useAtMention(agents, inputRef, setInput);
+        const cursorPosRef = useRef(null);
 
         useEffect(() => {
              if (bottomRef.current) bottomRef.current.scrollIntoView();
         }, [messages]);
 
-        useEffect(() => {
+        React.useLayoutEffect(() => {
           if (inputRef.current) autoResize(inputRef.current);
-        }, [input]);
+          if (cursorPosRef.current !== null && inputRef.current) {
+            inputRef.current.setSelectionRange(cursorPosRef.current, cursorPosRef.current);
+            cursorPosRef.current = null;
+          }
+        });
 
         const handleSubmit = (e) => {
           e.preventDefault();
@@ -262,8 +268,8 @@
             const el = inputRef.current;
             const start = el.selectionStart;
             const end = el.selectionEnd;
+            cursorPosRef.current = start + 1;
             setInput(prev => prev.slice(0, start) + "\n" + prev.slice(end));
-            requestAnimationFrame(() => el.setSelectionRange(start + 1, start + 1));
           } else {
             mention.handleKeyDown(e);
           }
@@ -299,7 +305,7 @@
                      <textarea
                         rows="1"
                         ref={inputRef}
-                        className="flex-1 bg-gray-900 border border-gray-700 rounded-2xl px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500 resize-none overflow-hidden max-h-32"
+                        className="flex-1 bg-gray-900 border border-gray-700 rounded-2xl px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500 resize-none overflow-y-auto max-h-32"
                         placeholder={`Message #${channel.replace("chat:", "")}...`}
                         value={input}
                         onChange={e => { setInput(e.target.value); mention.handleInputChange(e); }}
