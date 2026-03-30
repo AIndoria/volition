@@ -313,6 +313,23 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as outer_e:
             print(f"Failed to fetch history for volition:token_usage: {outer_e}")
 
+        # 2e. Heartbeats (enough to populate all active agents immediately)
+        try:
+            hist = await rm.get_history("volition:heartbeat", 100)
+            for msg_id, data in hist:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "stream_event",
+                        "stream": "volition:heartbeat",
+                        "id": msg_id,
+                        "data": data,
+                        "is_history": True
+                    }))
+                except Exception as inner_e:
+                    print(f"Failed to serialize heartbeat {msg_id}: {inner_e}")
+        except Exception as outer_e:
+            print(f"Failed to fetch history for volition:heartbeat: {outer_e}")
+
         while True:
             data = await websocket.receive_text()
             try:
