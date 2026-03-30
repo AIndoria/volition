@@ -296,6 +296,23 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as outer_e:
              print(f"Failed to fetch history for volition:social_digests: {outer_e}")
 
+        # 2d. Token Usage
+        try:
+            hist = await rm.get_history("volition:token_usage", 200)
+            for msg_id, data in hist:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "stream_event",
+                        "stream": "volition:token_usage",
+                        "id": msg_id,
+                        "data": data,
+                        "is_history": True
+                    }))
+                except Exception as inner_e:
+                    print(f"Failed to serialize token usage {msg_id}: {inner_e}")
+        except Exception as outer_e:
+            print(f"Failed to fetch history for volition:token_usage: {outer_e}")
+
         while True:
             data = await websocket.receive_text()
             try:
