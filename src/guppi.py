@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUPPI daemon - Volition 8.0.0-rc1 (The Roamer/Scribe Update)
+"""GUPPI daemon - Volition 8.0.0-rc2 (The Roamer/Scribe Update...Fix)
 Status: STABLE
 - Feature: Allow Roamers and Scribes Separately
 - Feature: Merge different Provider calls into one
@@ -246,6 +246,10 @@ class GuppiDaemon:
         self._stopping = False
         self._bg_tasks: List[asyncio.Task] = []
         self._is_pruning = False
+        self.pending_vector_tasks = {}
+        self._prune_started_at = 0.0
+        self._current_prune_id = None
+        self.SCRIBE_SUCCESS_EVENTS = {"TaskCompleted", "ScribeResult"} # this is what happens when code evolves more than the plandocs
         
         self.processed_triggers = {}
         self.processed_triggers_ttl = 90
@@ -285,7 +289,7 @@ class GuppiDaemon:
             except: pass
         
         self.last_social_sync_ts = self.last_sleep_ts
-        logger.info(f"GUPPI v7.8 Initialized for {self.abe_name}")
+        logger.info(f"GUPPI v8.0.0-rc2 Initialized for {self.abe_name}")
     
         # --- The Machete Helper ---
     def _truncate_output(self, text: str, limit: int = 20000) -> str:
@@ -462,14 +466,14 @@ class GuppiDaemon:
         except Exception as e:
             logger.warning(f"Overflow cleanup failed: {e}")
 
-    def _sanitize_history_block(self, limit=20):
+    def _sanitize_history_block(self, limit=20, buffer_override: Optional[List[Dict]] = None):
         """
         Returns context-safe history using the Overflow Pattern.
         - Most Recent Entry: kept intact up to 50k chars (working memory).
         - History Entries: truncated to 1k chars with file pointer (long-term ref).
         """
         sanitized = []
-        buffer_copy = self.log_buffer[-limit:]
+        buffer_copy = buffer_override[-limit:] if buffer_override is not None else self.log_buffer[-limit:]
         overflow_dir = MEMORY_DIR / "overflow"
         overflow_dir.mkdir(parents=True, exist_ok=True)
 
@@ -688,20 +692,28 @@ class GuppiDaemon:
     # --- LOG PRUNING WITH SCRIBE (RESTORED 7.2.3.1) ---
     async def _prune_logs(self):
         logger.info("[PRUNE] we ENTER _prune_logs")
-        if self._is_pruning: return # Double check
+        if self._is_pruning: 
+            logger.debug("Prune already in flight, skipping overlapping trigger.")
+            return
         self._is_pruning = True
+        self._prune_started_at = time.time()
+        self._current_prune_id = f"prune-{int(time.time())}"
         logger.info("[PRUNE] method _is_pruning set TRUE")
         try:
             ts = int(time.time())
             archive_path = ARCHIVE_DIR / f"log-{ts}.jsonl"
             try: shutil.copy2(WORKING_LOG, archive_path)
             except: pass
+            
+            async with self.log_lock:
+                prune_size = len(self.log_buffer)
+                buffer_snapshot = list(self.log_buffer[-30:])
             try:
-                log_content = archive_path.read_text()
+                # Grab the last 30 entries safely truncated
+                log_content = self._sanitize_history_block(limit=30, buffer_override=buffer_snapshot)
             except Exception as e:
                 log_content = f"Error reading log: {e}"
 
-            # v7.1: Improved Narrative Prompt
             prompt = (
                 f"Synthesize these logs into a Tier 2 Episode Memory.\n"
                 f"Focus on the NARRATIVE arc of what you accomplished or discovered.\n"
@@ -726,10 +738,13 @@ class GuppiDaemon:
             meta_json = json.dumps({
                 "maintenance": True,
                 "source_tier_1": f"log-{ts}.jsonl",
-                "mode": "summarize" 
+                "mode": "summarize",
+                "is_auto_prune": True,   # <--- So I can track it (and so can the Abes later)
+                "prune_size": prune_size, # Inject snapshot size
+                "prune_id": self._current_prune_id,
+                "prompt_path": prompt_path
             })
             
-            # v7.1: Use Pro model (Thinking) for better synthesis quality
             current_model = MODEL_SUMMARIZE
             
             cmd = [
@@ -740,15 +755,18 @@ class GuppiDaemon:
                 "--mode", "summarize",
                 "--meta", meta_json
             ]
-            await self._spawn_subprocess_exec(f"auto-prune-{ts}", cmd, tracked=False)
 
-            async with self.log_lock:
-                self.log_buffer = self.log_buffer[-15:]
-                await self._rewrite_log_file()
-        finally:
-            logger.info("[PRUNE] EXIT _prune_logs (before reset)")
-            self._is_pruning = False
+            spawn_success = await self._spawn_subprocess_exec(f"auto-prune-{ts}", cmd, tracked=False)
+            
+            if not spawn_success:
+                logger.error("Failed to spawn prune job. Releasing lock immediately.")
+                self._is_pruning = False
 
+        except Exception as e:
+            logger.error(f"Failed to spawn prune job: {e}")
+            self._is_pruning = False # Only reset here if the SPAWN failed
+        #  8.0.0_rc2 : We hold the lock until the inbox returns. Removed finally block.
+        
 
     # --- EVENT & INTENT LOGGING ---
 
@@ -844,7 +862,7 @@ class GuppiDaemon:
 
     
 
-    async def _ingest_tier2(self, norm: Dict):
+    async def _ingest_tier2(self, norm: Dict) -> bool:
         """v6.5: Ingests Tier 2 episodes and offloads vectorization to GPU Queue."""
         try:
             meta = norm["observed"].get("meta", {})
@@ -853,8 +871,8 @@ class GuppiDaemon:
             # THE FIX: Extract the event type safely from the payload envelope
             event_type = norm["observed"].get("event_type", norm["observed"].get("event", ""))
             
-            # THE FIX: Only ingest if Scribe actually succeeded (TaskCompleted)
-            if meta.get("mode") == "summarize" and content and event_type == "TaskCompleted":
+            # Only ingest if Scribe actually succeeded (any recognized success event)
+            if meta.get("mode") == "summarize" and meta.get("is_auto_prune") and content and event_type in self.SCRIBE_SUCCESS_EVENTS:
                 source_file = meta.get("source_tier_1", "unknown_source.jsonl")
                 summary_text = content
                 
@@ -882,9 +900,17 @@ class GuppiDaemon:
                 }
                 await retry_async(self.r.lpush, "queue:gpu_heavy", json.dumps(task_payload))
                 logger.info(f"Offloaded vectorization for {filename} to {self.internal_queue}")
+                return True
+            
+            elif meta.get("mode") == "summarize" and meta.get("is_auto_prune"):
+                logger.warning(f"Tier 2 ingest skipped! event_type={event_type}") # Just so the Abe knows.
+                return False
                 
         except Exception as e:
             logger.error(f"Failed to ingest Tier 2: {e}")
+            return False
+        
+        return False
 
     async def heartbeat_loop(self):
         while not self._stopping:
@@ -897,6 +923,11 @@ class GuppiDaemon:
                 }
                 logger.info(f"❤️ Heartbeat: Buffer={len(self.log_buffer)} Pruning={self._is_pruning}")
                 await retry_async(self.r.xadd, "volition:heartbeat", payload)
+
+                # 8.0.0_rc2 Deadlock Guard
+                if self._is_pruning and (time.time() - self._prune_started_at > 1800):
+                    logger.error("Auto-prune deadlocked (timeout exceeded 30m). Resetting lock.")
+                    self._is_pruning = False
 
                 # cheap check only
                 if len(self.log_buffer) > 30 and not self._is_pruning:
@@ -1041,7 +1072,7 @@ class GuppiDaemon:
         self._archive_inbox_message(norm)             
         
         # 3. Optional Tier 2 Ingest (Text only)
-        await self._ingest_tier2(norm)
+        ingest_success = await self._ingest_tier2(norm)
 
         # 4. MAINTENANCE GATES (The 7.7 Fix)
         meta = norm["observed"].get("meta", {})
@@ -1058,9 +1089,52 @@ class GuppiDaemon:
             return # <--- EXIT without Thinking
 
         # B. Silent Scribe / Background Tasks
-        if meta.get("maintenance") is True or "source_tier_1" in meta:
+        if meta.get("maintenance") is True:
+            if meta.get("is_auto_prune"):
+                incoming_id = meta.get("prune_id")
+                if incoming_id != getattr(self, "_current_prune_id", None):
+                    logger.warning(f"Discarding stale ghost prune job ({incoming_id}). A newer job owns the lock.")
+                    return # Exit without touching the lock or buffer!
+                
+            evt_type = norm["observed"].get("event_type", norm["observed"].get("event", ""))
+            
+            if evt_type == "ScribeFailed":
+                logger.error(f"Maintenance Scribe Failed! Output: {str(norm['observed'].get('content'))[:200]}")
+                if meta.get("is_auto_prune"):
+                    self._is_pruning = False # Release lock so heartbeat tries again
+                    self._current_prune_id = None
+                return 
+                
+            # Job finished successfully, handle auto-prune specifics
+            if evt_type in self.SCRIBE_SUCCESS_EVENTS and meta.get("is_auto_prune"):
+                if ingest_success:
+                    prune_size = meta.get("prune_size")
+                    if isinstance(prune_size, int):
+                        logger.info("Tier 2 Episode successfully generated. Pruning working memory.")
+                        async with self.log_lock:
+                            drop_count = max(0, prune_size - 15)
+                            self.log_buffer = self.log_buffer[drop_count:]
+                            await self._rewrite_log_file()
+                    else:
+                        logger.error(f"CRITICAL: Missing or invalid prune_size ({prune_size}). Skipping memory prune.")
+                else:
+                    logger.warning("Tier 2 ingestion failed. Skipping memory prune to avoid data loss.")
+                
+                # Unconditional unlock for this job, whether ingestion worked or not
+                self._is_pruning = False
+                self._current_prune_id = None
+
             await self.log_guppi_event("MaintenanceCompleted", f"Silent Scribe: {meta}", source="GUPPI:Background")
+
+            # --- CLEANUP TEMP FILES ---
+            prompt_file = meta.get("prompt_path")
+            if prompt_file and os.path.exists(prompt_file):
+                try:
+                    os.unlink(prompt_file)
+                except Exception as e:
+                    logger.warning(f"Failed to clean up temp prompt file {prompt_file}: {e}")
             return # <--- EXIT without Thinking
+
 
         # 5. THINKING TRIGGER (The 7.2.3 Safety)
         # We pass norm["observed"] (The Envelope) so the LLM sees 'from', 'meta', and 'raw'.
@@ -1196,7 +1270,7 @@ class GuppiDaemon:
     
 
     async def main_wait_loop(self):
-        logger.info("Entering Main Event Loop (Volition 7.8: Refractory + Orientation)...")
+        logger.info("Entering Main Event Loop (Volition 8.0.0-rc2)...")
         await self.governor.set_status("idle")
         
         # 1. RESTORED: Start Heartbeat
@@ -2190,10 +2264,12 @@ You were asleep for: {time_str}
                 # [FIX] Fire-and-forget waiter to reap the zombie from process table
                 asyncio.create_task(proc.wait()) 
                 logger.info(f"Spawned untracked process for {turn_id}")
+            return True
 
         except Exception as e:
             logger.error(f"Spawn failed: {e}")
             if tracked: self.subproc_semaphore.release()
+            return False
 
     async def _run_remote_ssh(self, turn_id, host, cmd):
         try:
