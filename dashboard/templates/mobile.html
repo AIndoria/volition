@@ -361,8 +361,16 @@
           );
       };
 
+      function normalizeRecipient(raw) {
+        return (raw || "").replace(/^inbox:/i, "").trim();
+      }
+      function isAbeAgent(name) {
+        return (name || "").toLowerCase().startsWith("abe-");
+      }
+
       const MobileUplink = ({ actions, onSendEmail, heartbeats }) => {
-          const [subTab, setSubTab] = useState("compose"); 
+          const [subTab, setSubTab] = useState("compose");
+          const [selectedInbox, setSelectedInbox] = useState("all");
           const [to, setTo] = useState("");
           const [msg, setMsg] = useState("");
 
@@ -399,6 +407,32 @@
              });
           }, [actions]);
 
+          const entities = useMemo(() => {
+              const set = new Set();
+              emails.forEach(e => {
+                  const sender = normalizeRecipient(e.agent);
+                  const recip = normalizeRecipient(e.action?.recipient);
+                  if (!isAbeAgent(sender)) set.add(sender);
+                  if (!isAbeAgent(recip)) set.add(recip);
+              });
+              return [...set].sort();
+          }, [emails]);
+
+          const filteredEmails = useMemo(() => {
+              if (selectedInbox === "all") return emails;
+              if (selectedInbox === "abe") {
+                  return emails.filter(e =>
+                      isAbeAgent(normalizeRecipient(e.agent)) && isAbeAgent(normalizeRecipient(e.action?.recipient))
+                  );
+              }
+              return emails.filter(e => {
+                  const sender = normalizeRecipient(e.agent).toLowerCase();
+                  const recip = normalizeRecipient(e.action?.recipient).toLowerCase();
+                  const target = selectedInbox.toLowerCase();
+                  return sender === target || recip === target;
+              });
+          }, [emails, selectedInbox]);
+
           const handleSend = (e) => {
               e.preventDefault();
               if(!to || !msg) return;
@@ -409,11 +443,24 @@
 
           return (
               <div className="flex flex-col h-full bg-gray-900">
+                 <div className="p-2 bg-gray-800 border-b border-gray-700">
+                     <select
+                         value={selectedInbox}
+                         onChange={(e) => setSelectedInbox(e.target.value)}
+                         className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white text-sm"
+                     >
+                         <option value="all">All</option>
+                         <option value="abe">Internal (Abe Fleet)</option>
+                         {entities.map(name => (
+                             <option key={name} value={name}>{name}</option>
+                         ))}
+                     </select>
+                 </div>
                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
                     {subTab === 'inbox' ? (
                         <div className="space-y-3">
-                           {emails.length === 0 && <div className="text-center text-gray-600 mt-10 text-sm">No recent emails found.</div>}
-                           {emails.map((e, i) => (
+                           {filteredEmails.length === 0 && <div className="text-center text-gray-600 mt-10 text-sm">No recent emails found.</div>}
+                           {filteredEmails.map((e, i) => (
                                <div key={i} className="bg-gray-800 border border-gray-700 p-3 rounded-lg">
                                   <div className="flex justify-between text-xs text-gray-500 mb-2">
                                      <span className="text-blue-300 font-bold">{e.agent} → {e.action.recipient}</span>
