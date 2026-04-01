@@ -8,6 +8,7 @@ Frontend: React (served via static template)
 import asyncio
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import List
@@ -241,23 +242,27 @@ async def websocket_endpoint(websocket: WebSocket):
             hist = await rm.redis.xrevrange("volition:action_log", count=2000)
             
             count = 0
-            email_count = 0 
-            
+            email_counts_per_inbox = {}  # recipient -> count of deep-scan emails sent
+            EMAIL_DEEP_SCAN_LIMIT = 25
+
             for msg_id, data in hist:
                 should_send = False
-                
+
                 # Rule 1: Always send the most recent 100 events
                 if count < 100:
                     should_send = True
-                
-                # Rule 2: Deep search for emails (Limit to last 15 found)
-                elif email_count < 15: 
+
+                # Rule 2: Deep search for emails (Limit to last 25 per inbox/recipient)
+                else:
                     try:
                         entry = json.loads(data.get("entry", "{}"))
                         tool = entry.get("action", {}).get("tool")
                         if tool == "email_send":
-                            should_send = True
-                            email_count += 1
+                            recipient = entry.get("action", {}).get("recipient", "")
+                            inbox = re.sub(r"^inbox:", "", recipient, flags=re.IGNORECASE).strip()
+                            if email_counts_per_inbox.get(inbox, 0) < EMAIL_DEEP_SCAN_LIMIT:
+                                should_send = True
+                                email_counts_per_inbox[inbox] = email_counts_per_inbox.get(inbox, 0) + 1
                     except: pass
 
                 if should_send:
