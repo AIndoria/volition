@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import List
 
 import redis.asyncio as redis
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -28,7 +29,12 @@ REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
 HUMAN_NAME = os.environ.get("HUMAN_NAME", "Human-Abe")
 
 # --- APP SETUP ---
-app = FastAPI(title="Volition Command")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(redis_listener())
+    yield
+
+app = FastAPI(title="Volition Command", lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 # --- ROUTES ---
@@ -197,9 +203,6 @@ async def redis_listener():
 
 # --- ROUTES ---
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(redis_listener())
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
