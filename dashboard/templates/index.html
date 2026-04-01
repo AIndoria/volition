@@ -486,6 +486,9 @@
                     </div>
                     <div className="text-gray-500 mt-0.5">
                       ↑{parseInt(d.prompt_tokens||0).toLocaleString()} ↓{parseInt(d.completion_tokens||0).toLocaleString()}
+                      {parseInt(d.cached_tokens||0) > 0 && (
+                        <span className="text-teal-500 ml-1">⚡{parseInt(d.cached_tokens).toLocaleString()} cached</span>
+                      )}
                     </div>
                   </div>
                 );
