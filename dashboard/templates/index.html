@@ -57,6 +57,152 @@
       .prose.prose-invert h1,
       .prose.prose-invert h2,
       .prose.prose-invert h3 { color: #e6edf3; }
+
+      /* Panel resize handles */
+      .resize-handle {
+        flex-shrink: 0;
+        width: 6px;
+        cursor: col-resize;
+        position: relative;
+        z-index: 10;
+        transition: background-color 0.15s ease;
+      }
+      .resize-handle::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        left: -4px;
+        right: -4px;
+      }
+      .resize-handle:hover { background-color: rgba(56, 139, 253, 0.35); }
+      .resize-handle:active { background-color: rgba(56, 139, 253, 0.6); }
+      .resize-handle-inner {
+        position: absolute;
+        inset: 0;
+        left: 2px;
+        right: 2px;
+        background: #30363d;
+        border-radius: 3px;
+        transition: background-color 0.15s ease;
+      }
+      .resize-handle:hover .resize-handle-inner { background: rgba(56, 139, 253, 0.7); }
+
+      /* Panel transitions */
+      .panel-transition {
+        transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                    min-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        overflow-x: hidden;
+      }
+      .panel-no-transition {
+        transition: none !important;
+      }
+
+      /* Collapsed icon buttons */
+      .collapsed-icon-btn {
+        width: 34px;
+        height: 30px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+        font-size: 11px;
+        font-weight: bold;
+        letter-spacing: 0.05em;
+        color: #6e7681;
+        border: 1px solid transparent;
+      }
+      .collapsed-icon-btn:hover {
+        background-color: rgba(56, 139, 253, 0.12);
+        border-color: rgba(56, 139, 253, 0.3);
+        color: #58a6ff;
+      }
+      .collapsed-icon-btn.active-channel {
+        background-color: rgba(56, 139, 253, 0.18);
+        border-color: rgba(56, 139, 253, 0.45);
+        color: #79c0ff;
+        box-shadow: 0 0 8px rgba(56, 139, 253, 0.15);
+      }
+      .collapsed-icon-btn.active-email {
+        background-color: rgba(56, 139, 253, 0.18);
+        border-color: rgba(56, 139, 253, 0.45);
+        color: #79c0ff;
+        box-shadow: 0 0 8px rgba(56, 139, 253, 0.15);
+      }
+
+      /* Collapsed sidebar expand trigger (logo area) */
+      .collapsed-logo-btn {
+        width: 100%;
+        padding: 10px 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        border-bottom: 1px solid #21262d;
+        transition: background-color 0.2s, color 0.2s;
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        color: #388bfd;
+        background: rgba(56, 139, 253, 0.05);
+        border-radius: 8px 8px 0 0;
+        flex-shrink: 0;
+      }
+      .collapsed-logo-btn:hover {
+        background-color: rgba(56, 139, 253, 0.15);
+        color: #79c0ff;
+      }
+
+      /* Prominent expand button at bottom of collapsed sidebar */
+      .sidebar-expand-btn {
+        width: 34px;
+        height: 34px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: background-color 0.15s, color 0.15s, box-shadow 0.15s, transform 0.15s;
+        font-size: 16px;
+        color: #388bfd;
+        background: rgba(56, 139, 253, 0.1);
+        border: 1px solid rgba(56, 139, 253, 0.35);
+        flex-shrink: 0;
+      }
+      .sidebar-expand-btn:hover {
+        background-color: rgba(56, 139, 253, 0.22);
+        border-color: rgba(56, 139, 253, 0.6);
+        color: #79c0ff;
+        box-shadow: 0 0 10px rgba(56, 139, 253, 0.25);
+      }
+
+      /* Collapse button in expanded header */
+      .sidebar-collapse-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 16px;
+        color: #388bfd;
+        background: rgba(56, 139, 253, 0.1);
+        border: 1px solid rgba(56, 139, 253, 0.35);
+        transition: background-color 0.15s, color 0.15s, box-shadow 0.15s, transform 0.15s;
+        flex-shrink: 0;
+      }
+      .sidebar-collapse-btn:hover {
+        background-color: rgba(56, 139, 253, 0.22);
+        border-color: rgba(56, 139, 253, 0.6);
+        color: #79c0ff;
+        box-shadow: 0 0 10px rgba(56, 139, 253, 0.25);
+      }
+
+      /* Prevent content from stealing mouse during drag */
+      .is-resizing * { pointer-events: none !important; }
+      .is-resizing { cursor: col-resize !important; user-select: none !important; }
     </style>
   </head>
   <body class="h-screen w-screen overflow-hidden flex flex-col">
@@ -151,6 +297,20 @@
       const autoResize = (el) => {
         el.style.height = "0";
         el.style.height = el.scrollHeight + "px";
+      };
+
+      const ResizeHandle = ({ onMouseDown, onDoubleClick, hidden }) => {
+        if (hidden) return null;
+        return (
+          <div
+            className="resize-handle"
+            onMouseDown={onMouseDown}
+            onDoubleClick={onDoubleClick}
+            title="Drag to resize · Double-click to reset"
+          >
+            <div className="resize-handle-inner" />
+          </div>
+        );
       };
 
       const MentionPopup = ({ visible, agents, selectedIndex, onSelect, anchorRef }) => {
@@ -502,7 +662,7 @@
         };
 
         return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
+          <div className="flex flex-col flex-1 glass-panel rounded-lg mx-2 my-1 p-2 min-h-0">
             <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1 flex justify-between">
               <span>Token Usage</span>
               <span className="text-[10px] opacity-50">{entries.length}</span>
@@ -571,7 +731,7 @@
         };
 
         return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
+          <div className="flex flex-col flex-1 glass-panel rounded-lg mx-2 my-1 p-2 min-h-0">
              <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1 flex justify-between">
               <span>Ambient Messages</span>
               <span className="text-[10px] opacity-50">{digests.length}</span>
@@ -632,7 +792,7 @@
           return [...seen.values()].reverse();
         }, [events]);
         return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
+          <div className="flex flex-col flex-1 glass-panel rounded-lg mx-2 my-1 p-2 min-h-0">
             <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1">
               Action Log
             </h2>
@@ -830,6 +990,88 @@
         const [tokenUsage, setTokenUsage] = useState([]);
         const [connected, setConnected] = useState(false);
 
+        // Panel resize / collapse state
+        const [leftWidth, setLeftWidth] = useState(256);
+        const [rightWidth, setRightWidth] = useState(384);
+        const [leftCollapsed, setLeftCollapsed] = useState(false);
+        const [rightCollapsed, setRightCollapsed] = useState(false);
+        const [isDragging, setIsDragging] = useState(false);
+        const leftWidthRef = useRef(256);
+        const rightWidthRef = useRef(384);
+        const prevLeftWidth = useRef(256);
+        const prevRightWidth = useRef(384);
+
+        // Sync refs when state changes (not during drag — refs stay as source of truth during drag)
+        useEffect(() => { leftWidthRef.current = leftWidth; }, [leftWidth]);
+        useEffect(() => { rightWidthRef.current = rightWidth; }, [rightWidth]);
+
+        // Auto-collapse right panel when all toggles are off
+        const allRightHidden = !showLogs && !showDigests && !showTokens;
+        useEffect(() => {
+          if (allRightHidden && !rightCollapsed) {
+            prevRightWidth.current = rightWidthRef.current;
+            setRightCollapsed(true);
+          } else if (!allRightHidden && rightCollapsed) {
+            setRightCollapsed(false);
+          }
+        }, [allRightHidden]);
+
+        const toggleLeftCollapse = () => {
+          if (!leftCollapsed) {
+            prevLeftWidth.current = leftWidthRef.current;
+            setLeftCollapsed(true);
+          } else {
+            setLeftCollapsed(false);
+            const restored = prevLeftWidth.current || 256;
+            leftWidthRef.current = restored;
+            setLeftWidth(restored);
+          }
+        };
+
+        const toggleRightCollapse = () => {
+          if (!rightCollapsed) {
+            prevRightWidth.current = rightWidthRef.current;
+            setRightCollapsed(true);
+          } else {
+            setRightCollapsed(false);
+            const restored = prevRightWidth.current || 384;
+            rightWidthRef.current = restored;
+            setRightWidth(restored);
+          }
+        };
+
+        const startResize = (side, defaultWidth) => (e) => {
+          e.preventDefault();
+          const startX = e.clientX;
+          const startWidth = side === 'left' ? leftWidthRef.current : rightWidthRef.current;
+          setIsDragging(true);
+          document.body.classList.add('is-resizing');
+
+          const onMove = (ev) => {
+            const delta = side === 'left' ? ev.clientX - startX : startX - ev.clientX;
+            const min = side === 'left' ? 180 : 280;
+            const max = side === 'left' ? 480 : 600;
+            const next = Math.min(max, Math.max(min, startWidth + delta));
+            if (side === 'left') { leftWidthRef.current = next; setLeftWidth(next); }
+            else { rightWidthRef.current = next; setRightWidth(next); }
+          };
+
+          const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.classList.remove('is-resizing');
+            setIsDragging(false);
+          };
+
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        };
+
+        const resetWidth = (side) => () => {
+          if (side === 'left') { leftWidthRef.current = 256; setLeftWidth(256); }
+          else { rightWidthRef.current = 384; setRightWidth(384); }
+        };
+
         useEffect(() => {
           let ws = null;
           let backoff = 1000;
@@ -958,6 +1200,14 @@
             }));
         };
 
+        // Inline style objects — computed as variables (avoids Jinja2 double-brace conflicts)
+        const noTransition = isDragging ? 'panel-no-transition' : 'panel-transition';
+        const leftPanelStyle = { width: leftCollapsed ? 48 : leftWidth, minWidth: leftCollapsed ? 48 : 180, flexShrink: 0 };
+        const rightPanelStyle = { width: rightCollapsed ? 48 : rightWidth, minWidth: rightCollapsed ? 48 : 280, flexShrink: 0 };
+        const collapsedStripStyle = { height: '100%', overflow: 'hidden', width: '100%' };
+        const collapsedScrollStyle = { flex: '1 1 0', overflowY: 'auto', overflowX: 'hidden', minHeight: 0 };
+        const collapsedFooterStyle = { flexShrink: 0 };
+
         return (
           <div className="flex flex-col h-full bg-[#0d1117]">
             {!connected && (
@@ -966,119 +1216,243 @@
               </div>
             )}
             <div className="flex flex-1 min-h-0">
-            <div className="flex flex-col w-64 glass-panel m-2 rounded-lg border-r border-gray-800">
-              <div className="p-4 text-xl font-bold text-white tracking-widest border-b border-gray-800 text-center bg-gray-900/50 rounded-t-lg">
-                VOLITION
-              </div>
 
-              {/* IDENTITY INPUT */}
-              <div className="p-2 border-b border-gray-800 bg-gray-900/30">
-                  <div className="text-[10px] text-gray-500 font-bold mb-1 uppercase tracking-widest">Identity</div>
-                  <input 
-                    value={identity}
-                    onChange={(e) => setIdentity(e.target.value)}
-                    className="w-full bg-gray-900 border border-gray-700 text-sm text-blue-200 p-1.5 rounded focus:outline-none focus:border-blue-500"
-                    placeholder="Sender Name..."
-                  />
-              </div>
-
-              <div className="p-2 space-y-1">
-                <div className="text-[10px] text-gray-500 px-4 py-2 font-bold uppercase tracking-widest">
-                  COMMS
-                </div>
-                {channels.map((ch) => (
-                  <button
-                    key={ch}
-                    onClick={() => setActiveView(ch)}
-                    className={`w-full text-left px-4 py-2 rounded text-sm transition-all ${
-                      activeView === ch
-                        ? "bg-gray-800 text-white shadow-md"
-                        : "text-gray-400 hover:bg-gray-800/50"
-                    }`}
-                  >
-                    <span className="opacity-50 mr-2">#</span>
-                    {ch.replace("chat:", "")}
-                  </button>
-                ))}
-                <button
-                  onClick={() => setActiveView("emails")}
-                  className={`w-full text-left px-4 py-2 rounded text-sm transition-all mt-2 ${
-                    activeView === "emails"
-                      ? "bg-blue-900/30 text-blue-300 border border-blue-800/30"
-                      : "text-gray-400 hover:bg-gray-800/50"
-                  }`}
-                >
-                  <span className="mr-2">✉️</span>Uplink
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-hidden flex flex-col border-t border-gray-800 mt-2">
-                <Sidebar heartbeats={heartbeats} />
-              </div>
-            </div>
-
-            <div className="flex-1 flex flex-col min-w-0 py-2">
-              {activeView === "emails" ? (
-                <EmailView actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />
-              ) : (
-                <ChatWindow
-                  channel={activeView}
-                  messages={chats[activeView] || []}
-                  onSend={handleSendChat}
-                  identity={identity}
-                  heartbeats={heartbeats}
-                />
-              )}
-            </div>
-
-            <div className="w-96 flex flex-col py-2 pr-2 h-full">
-               {/* Toggle Controls */}
-               <div className="flex justify-end gap-1 mb-1 px-2">
-                  <button 
-                    onClick={() => setShowLogs(!showLogs)} 
-                    className={`text-[10px] px-2 py-0.5 rounded border ${showLogs ? 'bg-blue-900/30 border-blue-800 text-blue-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
-                  >
-                    LOGS
-                  </button>
-                  <button
-                    onClick={() => setShowDigests(!showDigests)}
-                    className={`text-[10px] px-2 py-0.5 rounded border ${showDigests ? 'bg-purple-900/30 border-purple-800 text-purple-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
-                  >
-                    DIGESTS
-                  </button>
-                  <button
-                    onClick={() => setShowTokens(!showTokens)}
-                    className={`text-[10px] px-2 py-0.5 rounded border ${showTokens ? 'bg-cyan-900/30 border-cyan-800 text-cyan-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
-                  >
-                    TOKENS
-                  </button>
-               </div>
-
-               {/* Stacked Panels */}
-               {(() => {
-                  const visibleCount = (showLogs ? 1 : 0) + (showDigests ? 1 : 0) + (showTokens ? 1 : 0);
-                  const panelClass = visibleCount === 1 ? 'h-full' : visibleCount === 2 ? 'h-1/2' : 'h-1/3';
-                  return (
-                    <div className="flex-1 flex flex-col min-h-0 gap-2">
-                      {showLogs && (
-                        <div className={`${panelClass} transition-all duration-300`}>
-                          <ActionLog events={actions} />
-                        </div>
-                      )}
-                      {showDigests && (
-                        <div className={`${panelClass} transition-all duration-300`}>
-                          <DigestPanel digests={digests} />
-                        </div>
-                      )}
-                      {showTokens && (
-                        <div className={`${panelClass} transition-all duration-300`}>
-                          <TokenUsagePanel entries={tokenUsage} />
-                        </div>
-                      )}
+              {/* ── LEFT SIDEBAR ── */}
+              <div
+                className={`flex flex-col glass-panel m-2 rounded-lg border-r border-gray-800 ${noTransition}`}
+                style={leftPanelStyle}
+              >
+                {leftCollapsed ? (
+                  /* COLLAPSED LEFT — icon strip */
+                  <div className="flex flex-col items-center w-full" style={collapsedStripStyle}>
+                    {/* Clickable logo — expands sidebar */}
+                    <button
+                      onClick={toggleLeftCollapse}
+                      title="Expand VOLITION sidebar"
+                      className="collapsed-logo-btn"
+                    >
+                      V
+                    </button>
+                    {/* Channel icons — scrollable middle section */}
+                    <div className="flex flex-col items-center gap-1.5 py-2 px-1" style={collapsedScrollStyle}>
+                      {channels.map((ch) => (
+                        <button
+                          key={ch}
+                          onClick={() => setActiveView(ch)}
+                          title={ch.replace("chat:", "")}
+                          className={`collapsed-icon-btn ${activeView === ch ? 'active-channel' : ''}`}
+                        >
+                          #
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setActiveView("emails")}
+                        title="Uplink · Email"
+                        className={`collapsed-icon-btn ${activeView === "emails" ? 'active-email' : ''}`}
+                      >
+                        ✉
+                      </button>
                     </div>
-                  );
-               })()}
-            </div>
+                    {/* Prominent expand button pinned to bottom */}
+                    <div className="flex items-center justify-center pb-2 pt-1" style={collapsedFooterStyle}>
+                      <button
+                        onClick={toggleLeftCollapse}
+                        title="Expand sidebar"
+                        className="sidebar-expand-btn"
+                      >
+                        ›
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* EXPANDED LEFT — full sidebar */
+                  <>
+                    {/* Header + collapse button */}
+                    <div className="flex items-center border-b border-gray-800 bg-gray-900/50 rounded-t-lg px-2">
+                      <div className="flex-1 py-4 text-xl font-bold text-white tracking-widest text-center select-none">
+                        VOLITION
+                      </div>
+                      <button
+                        onClick={toggleLeftCollapse}
+                        title="Collapse sidebar"
+                        className="sidebar-collapse-btn"
+                      >
+                        ‹
+                      </button>
+                    </div>
+
+                    {/* Identity input */}
+                    <div className="p-2 border-b border-gray-800 bg-gray-900/30">
+                      <div className="text-[10px] text-gray-500 font-bold mb-1 uppercase tracking-widest">Identity</div>
+                      <input
+                        value={identity}
+                        onChange={(e) => setIdentity(e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 text-sm text-blue-200 p-1.5 rounded focus:outline-none focus:border-blue-500"
+                        placeholder="Sender Name..."
+                      />
+                    </div>
+
+                    {/* Channel list */}
+                    <div className="p-2 space-y-1">
+                      <div className="text-[10px] text-gray-500 px-4 py-2 font-bold uppercase tracking-widest">COMMS</div>
+                      {channels.map((ch) => (
+                        <button
+                          key={ch}
+                          onClick={() => setActiveView(ch)}
+                          className={`w-full text-left px-4 py-2 rounded text-sm transition-all ${
+                            activeView === ch ? "bg-gray-800 text-white shadow-md" : "text-gray-400 hover:bg-gray-800/50"
+                          }`}
+                        >
+                          <span className="opacity-50 mr-2">#</span>
+                          {ch.replace("chat:", "")}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setActiveView("emails")}
+                        className={`w-full text-left px-4 py-2 rounded text-sm transition-all mt-2 ${
+                          activeView === "emails"
+                            ? "bg-blue-900/30 text-blue-300 border border-blue-800/30"
+                            : "text-gray-400 hover:bg-gray-800/50"
+                        }`}
+                      >
+                        <span className="mr-2">✉️</span>Uplink
+                      </button>
+                    </div>
+
+                    {/* Fleet status */}
+                    <div className="flex-1 overflow-hidden flex flex-col border-t border-gray-800 mt-2">
+                      <Sidebar heartbeats={heartbeats} />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              {/* Left resize handle */}
+              <ResizeHandle
+                hidden={leftCollapsed}
+                onMouseDown={startResize('left')}
+                onDoubleClick={resetWidth('left')}
+              />
+
+              {/* ── CENTER CONTENT ── */}
+              <div className="flex-1 flex flex-col min-w-0 py-2">
+                {activeView === "emails" ? (
+                  <EmailView actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />
+                ) : (
+                  <ChatWindow
+                    channel={activeView}
+                    messages={chats[activeView] || []}
+                    onSend={handleSendChat}
+                    identity={identity}
+                    heartbeats={heartbeats}
+                  />
+                )}
+              </div>
+
+              {/* Right resize handle */}
+              <ResizeHandle
+                hidden={rightCollapsed}
+                onMouseDown={startResize('right')}
+                onDoubleClick={resetWidth('right')}
+              />
+
+              {/* ── RIGHT PANEL ── */}
+              <div
+                className={`flex flex-col py-2 pr-2 min-h-0 ${noTransition}`}
+                style={rightPanelStyle}
+              >
+                {rightCollapsed ? (
+                  /* COLLAPSED RIGHT — vertical strip */
+                  <div className="flex flex-col items-center gap-1" style={collapsedStripStyle}>
+                    {/* Expand button at top */}
+                    <button
+                      onClick={toggleRightCollapse}
+                      title="Expand panel"
+                      className="sidebar-expand-btn mb-1"
+                    >
+                      ‹
+                    </button>
+                    {/* Vertical toggle buttons — clicking re-enables and expands */}
+                    <button
+                      onClick={() => { setShowLogs(true); setRightCollapsed(false); }}
+                      title="Show Logs"
+                      className={`collapsed-icon-btn ${showLogs ? 'text-blue-300 bg-blue-900/30' : 'text-gray-500'}`}
+                    >
+                      L
+                    </button>
+                    <button
+                      onClick={() => { setShowDigests(true); setRightCollapsed(false); }}
+                      title="Show Digests"
+                      className={`collapsed-icon-btn ${showDigests ? 'text-purple-300 bg-purple-900/30' : 'text-gray-500'}`}
+                    >
+                      D
+                    </button>
+                    <button
+                      onClick={() => { setShowTokens(true); setRightCollapsed(false); }}
+                      title="Show Tokens"
+                      className={`collapsed-icon-btn ${showTokens ? 'text-cyan-300 bg-cyan-900/30' : 'text-gray-500'}`}
+                    >
+                      T
+                    </button>
+                  </div>
+                ) : (
+                  /* EXPANDED RIGHT — full panel */
+                  <>
+                    {/* Toggle controls row */}
+                    <div className="flex items-center gap-1 mb-1 px-1">
+                      <button
+                        onClick={() => setShowLogs(!showLogs)}
+                        className={`text-[10px] px-2 py-0.5 rounded border flex-1 transition-colors ${showLogs ? 'bg-blue-900/30 border-blue-800 text-blue-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
+                      >
+                        LOGS
+                      </button>
+                      <button
+                        onClick={() => setShowDigests(!showDigests)}
+                        className={`text-[10px] px-2 py-0.5 rounded border flex-1 transition-colors ${showDigests ? 'bg-purple-900/30 border-purple-800 text-purple-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
+                      >
+                        DIGESTS
+                      </button>
+                      <button
+                        onClick={() => setShowTokens(!showTokens)}
+                        className={`text-[10px] px-2 py-0.5 rounded border flex-1 transition-colors ${showTokens ? 'bg-cyan-900/30 border-cyan-800 text-cyan-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
+                      >
+                        TOKENS
+                      </button>
+                      {/* Manual collapse button */}
+                      <button
+                        onClick={toggleRightCollapse}
+                        title="Collapse panel"
+                        className="sidebar-collapse-btn ml-1"
+                      >
+                        ›
+                      </button>
+                    </div>
+
+                    {/* Stacked sub-panels — flex-1 on each so gap-2 spacing is absorbed correctly */}
+                    {(() => {
+                      return (
+                        <div className="flex-1 flex flex-col min-h-0">
+                          {showLogs && (
+                            <div className="flex-1 min-h-0 flex flex-col transition-all duration-300">
+                              <ActionLog events={actions} />
+                            </div>
+                          )}
+                          {showDigests && (
+                            <div className="flex-1 min-h-0 flex flex-col transition-all duration-300">
+                              <DigestPanel digests={digests} />
+                            </div>
+                          )}
+                          {showTokens && (
+                            <div className="flex-1 min-h-0 flex flex-col transition-all duration-300">
+                              <TokenUsagePanel entries={tokenUsage} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
+              </div>
             </div>
           </div>
         );
