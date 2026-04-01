@@ -36,7 +36,7 @@ templates = Jinja2Templates(directory="templates")
 @app.get("/mobile", response_class=HTMLResponse)
 async def get_mobile(request: Request):
     """Force load the mobile interface."""
-    return templates.TemplateResponse("mobile.html", {"request": request, "human_name": HUMAN_NAME})
+    return templates.TemplateResponse(request=request, name="mobile.html", context={"human_name": HUMAN_NAME})
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
@@ -49,10 +49,10 @@ async def get_dashboard(request: Request):
 
     # "Automagic" detection
     if "mobile" in user_agent or "android" in user_agent or "iphone" in user_agent:
-        return templates.TemplateResponse("mobile.html", {"request": request, "human_name": HUMAN_NAME})
+        return templates.TemplateResponse(request=request, name="mobile.html", context={"human_name": HUMAN_NAME})
 
     # Fallback to desktop
-    return templates.TemplateResponse("index.html", {"request": request, "human_name": HUMAN_NAME})
+    return templates.TemplateResponse(request=request, name="index.html", context={"human_name": HUMAN_NAME})
 
 # --- REDIS MANAGER ---
 class RedisManager:
