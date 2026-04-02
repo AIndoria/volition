@@ -239,7 +239,7 @@
         const cursorPosRef = useRef(null);
 
         useEffect(() => {
-             if (bottomRef.current) bottomRef.current.scrollIntoView();
+             if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
         }, [messages]);
 
         React.useLayoutEffect(() => {
@@ -517,6 +517,11 @@
       };
 
       const MobileTokenUsage = ({ entries }) => {
+          const bottomRef = useRef(null);
+          useEffect(() => {
+              if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
+          }, [entries]);
+
           const utilizationColor = (pct) => {
               const p = parseFloat(pct);
               if (p >= 80) return "bg-red-500";
@@ -560,6 +565,7 @@
                           </div>
                       );
                   })}
+                  <div ref={bottomRef} />
               </div>
           );
       };
@@ -580,6 +586,10 @@
 
       const MobileActivity = ({ actions, digests }) => {
           const [subTab, setSubTab] = useState("logs");
+          const bottomRef = useRef(null);
+          useEffect(() => {
+              if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
+          }, [actions, digests]);
 
           const dedupedActions = useMemo(() => {
               const seen = new Map();
@@ -633,6 +643,7 @@
                               })}
                           </div>
                       )}
+                      <div ref={bottomRef} />
                   </div>
 
                   {/* Bottom Sub-Tabs */}
