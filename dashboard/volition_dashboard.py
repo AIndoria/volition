@@ -247,6 +247,9 @@ async def websocket_endpoint(websocket: WebSocket):
             count = 0
             email_counts_per_inbox = {}  # recipient -> count of deep-scan emails sent
             EMAIL_DEEP_SCAN_LIMIT = 25
+            error_count = 0
+            ERROR_DEEP_SCAN_LIMIT = 100
+            ERROR_STATUSES = {"error", "self_correcting", "interrupted", "failed"}
 
             for msg_id, data in hist:
                 should_send = False
@@ -255,17 +258,34 @@ async def websocket_endpoint(websocket: WebSocket):
                 if count < 100:
                     should_send = True
 
-                # Rule 2: Deep search for emails (Limit to last 25 per inbox/recipient)
+                # Rule 2: Deep search for emails and errors beyond recent 100
                 else:
                     try:
                         entry = json.loads(data.get("entry", "{}"))
                         tool = entry.get("action", {}).get("tool")
+
+                        # 2a: Emails (up to 25 per inbox)
                         if tool == "email_send":
                             recipient = entry.get("action", {}).get("recipient", "")
                             inbox = re.sub(r"^inbox:", "", recipient, flags=re.IGNORECASE).strip()
                             if email_counts_per_inbox.get(inbox, 0) < EMAIL_DEEP_SCAN_LIMIT:
                                 should_send = True
                                 email_counts_per_inbox[inbox] = email_counts_per_inbox.get(inbox, 0) + 1
+
+                        # 2b: Errors (up to 100 total)
+                        if not should_send and error_count < ERROR_DEEP_SCAN_LIMIT:
+                            status = entry.get("status", "")
+                            results = entry.get("results", {}) if isinstance(entry.get("results"), dict) else {}
+                            reasoning = entry.get("reasoning", "")
+                            is_error = (
+                                status in ERROR_STATUSES
+                                or results.get("status") in {"error", "failed"}
+                                or "error" in results
+                                or (isinstance(reasoning, str) and reasoning.startswith("Error:"))
+                            )
+                            if is_error:
+                                should_send = True
+                                error_count += 1
                     except: pass
 
                 if should_send:

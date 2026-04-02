@@ -817,7 +817,7 @@
                                    const ta = JSON.parse(a.data.entry||"{}").timestamp_intent || "";
                                    const tb = JSON.parse(b.data.entry||"{}").timestamp_intent || "";
                                    return tb.localeCompare(ta);
-                               }).slice(0, 50);
+                               }).slice(0, 300);
                            });
                        }
                        else if (msg.stream === "volition:social_digests") {
