@@ -810,6 +810,8 @@
                     ? "text-green-400"
                     : entry.status === "pending"
                     ? "text-yellow-400"
+                    : ["error", "failed", "self_correcting", "interrupted"].includes(entry.status)
+                    ? "text-red-400"
                     : "text-blue-400";
 
                 return (
@@ -844,6 +846,171 @@
                   </div>
                 );
               })}
+              <div ref={bottomRef} />
+            </div>
+          </div>
+        );
+      };
+
+      const isErrorEntry = (entry) => {
+        const errorStatuses = ['error', 'self_correcting', 'interrupted', 'failed'];
+        if (errorStatuses.includes(entry.status)) return true;
+        const r = entry.results || {};
+        if (r.error || r.status === 'error' || r.status === 'failed') return true;
+        if (typeof entry.reasoning === 'string' && entry.reasoning.startsWith('Error:')) return true;
+        return false;
+      };
+
+      const getErrorMessage = (entry) => {
+        const r = entry.results || {};
+        return r.error || r.message || (entry.reasoning?.startsWith('Error:') ? entry.reasoning : null) || 'Unknown error';
+      };
+
+      const ErrorPanel = ({ events }) => {
+        const bottomRef = useRef(null);
+        const [filterType, setFilterType] = useState("all");
+        const [filterAgent, setFilterAgent] = useState("all");
+        const [filterText, setFilterText] = useState("");
+
+        const allErrors = useMemo(() => {
+          const seen = new Map();
+          for (let i = events.length - 1; i >= 0; i--) {
+            try {
+              const entry = JSON.parse(events[i].data.entry || "{}");
+              const key = entry.id || events[i].id;
+              if (!seen.has(key)) seen.set(key, { streamEvent: events[i], entry });
+            } catch { continue; }
+          }
+          return [...seen.values()]
+            .filter(({ entry }) => isErrorEntry(entry))
+            .reverse();
+        }, [events]);
+
+        // Derive unique agents and status types for filter dropdowns
+        const uniqueAgents = useMemo(() => {
+          const agents = new Set();
+          allErrors.forEach(({ entry }) => { if (entry.agent) agents.add(entry.agent); });
+          return [...agents].sort();
+        }, [allErrors]);
+
+        const uniqueStatuses = useMemo(() => {
+          const statuses = new Set();
+          allErrors.forEach(({ entry }) => { if (entry.status) statuses.add(entry.status); });
+          return [...statuses].sort();
+        }, [allErrors]);
+
+        // Apply filters
+        const filteredErrors = useMemo(() => {
+          return allErrors.filter(({ entry }) => {
+            if (filterType !== "all" && entry.status !== filterType) return false;
+            if (filterAgent !== "all" && entry.agent !== filterAgent) return false;
+            if (filterText) {
+              const needle = filterText.toLowerCase();
+              const msg = getErrorMessage(entry).toLowerCase();
+              const tool = (entry.action?.tool || "").toLowerCase();
+              const reasoning = (entry.reasoning || "").toLowerCase();
+              const agent = (entry.agent || "").toLowerCase();
+              if (!msg.includes(needle) && !tool.includes(needle) && !reasoning.includes(needle) && !agent.includes(needle)) return false;
+            }
+            return true;
+          });
+        }, [allErrors, filterType, filterAgent, filterText]);
+
+        useEffect(
+          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
+          [filteredErrors]
+        );
+
+        const statusBadge = (status) => {
+          if (status === 'error' || status === 'failed')
+            return <span className="text-[10px] bg-red-900/50 text-red-300 border border-red-800 px-1 rounded font-bold uppercase">{status}</span>;
+          if (status === 'self_correcting')
+            return <span className="text-[10px] bg-orange-900/50 text-orange-300 border border-orange-800 px-1 rounded font-bold uppercase">self-correcting</span>;
+          if (status === 'interrupted')
+            return <span className="text-[10px] bg-yellow-900/50 text-yellow-300 border border-yellow-800 px-1 rounded font-bold uppercase">interrupted</span>;
+          return null;
+        };
+
+        const selectStyle = "bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-500 transition-colors";
+
+        return (
+          <div className="flex flex-col h-full glass-panel rounded-lg m-2">
+            {/* Header */}
+            <div className="p-3 border-b border-gray-700 bg-gray-800 rounded-t-lg">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-red-400 tracking-wider">ERRORS</span>
+                  {allErrors.length > 0 && (
+                    <span className="text-[10px] bg-red-900/50 text-red-300 border border-red-800 px-1.5 py-0.5 rounded-full font-bold">
+                      {filteredErrors.length === allErrors.length ? allErrors.length : `${filteredErrors.length} / ${allErrors.length}`}
+                    </span>
+                  )}
+                </div>
+                {(filterType !== "all" || filterAgent !== "all" || filterText) && (
+                  <button
+                    onClick={() => { setFilterType("all"); setFilterAgent("all"); setFilterText(""); }}
+                    className="text-[10px] text-gray-500 hover:text-red-400 transition-colors px-2 py-0.5 border border-gray-700 rounded"
+                  >
+                    Clear Filters
+                  </button>
+                )}
+              </div>
+              {/* Filters Row */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className={selectStyle}>
+                  <option value="all">All Types</option>
+                  {uniqueStatuses.map(s => (
+                    <option key={s} value={s}>{s === 'self_correcting' ? 'Self-Correcting' : s.charAt(0).toUpperCase() + s.slice(1)}</option>
+                  ))}
+                </select>
+                <select value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)} className={selectStyle}>
+                  <option value="all">All Agents</option>
+                  {uniqueAgents.map(a => <option key={a} value={a}>{a}</option>)}
+                </select>
+                <input
+                  value={filterText}
+                  onChange={(e) => setFilterText(e.target.value)}
+                  placeholder="Search errors..."
+                  className="flex-1 min-w-[120px] bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-500 transition-colors"
+                />
+              </div>
+            </div>
+
+            {/* Error List */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs scrollbar-thin">
+              {filteredErrors.length === 0 && (
+                <div className="text-gray-600 text-center italic mt-10">
+                  {allErrors.length === 0 ? "No errors detected." : "No errors match the current filters."}
+                </div>
+              )}
+              {filteredErrors.map(({ streamEvent, entry }, i) => (
+                <div
+                  key={i}
+                  className="border-l-2 border-red-800 pl-3 py-2 hover:bg-red-950/20 transition-colors bg-red-950/10 rounded-r"
+                >
+                  <div className="flex justify-between text-gray-500 mb-1 items-center">
+                    <span className="font-bold text-blue-300">{entry.agent}</span>
+                    <span>{formatTime(entry.timestamp_intent || "")}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="text-red-400 font-bold">{entry.action?.tool || "Unknown Tool"}</span>
+                    {statusBadge(entry.status)}
+                  </div>
+                  <div className="text-red-300/80 mb-1 break-all bg-red-950/30 px-2 py-1.5 rounded text-[11px] leading-relaxed">
+                    {getErrorMessage(entry)}
+                  </div>
+                  {/* Tool Args */}
+                  <div className="text-gray-500 mb-1 break-all opacity-60 text-[10px]">
+                    {JSON.stringify(entry.action || {}).slice(0, 200)}
+                    {JSON.stringify(entry.action || {}).length > 200 ? "..." : ""}
+                  </div>
+                  {entry.reasoning && !entry.reasoning.startsWith('Error:') && (
+                    <div className="text-gray-500 italic pl-2 border-l border-gray-600 mt-1">
+                      "{entry.reasoning}"
+                    </div>
+                  )}
+                </div>
+              ))}
               <div ref={bottomRef} />
             </div>
           </div>
@@ -1252,6 +1419,15 @@
                       >
                         ✉
                       </button>
+                      {/* Utilities separator */}
+                      <div className="w-4 border-t border-gray-700 my-1"></div>
+                      <button
+                        onClick={() => setActiveView("errors")}
+                        title="Errors"
+                        className={`collapsed-icon-btn ${activeView === "errors" ? 'text-red-300 bg-red-900/30 ring-1 ring-red-800' : ''}`}
+                      >
+                        !
+                      </button>
                     </div>
                     {/* Prominent expand button pinned to bottom */}
                     <div className="flex items-center justify-center pb-2 pt-1" style={collapsedFooterStyle}>
@@ -1319,6 +1495,21 @@
                       </button>
                     </div>
 
+                    {/* Utilities */}
+                    <div className="p-2 space-y-1 border-t border-gray-800">
+                      <div className="text-[10px] text-gray-500 px-4 py-2 font-bold uppercase tracking-widest">UTILITIES</div>
+                      <button
+                        onClick={() => setActiveView("errors")}
+                        className={`w-full text-left px-4 py-2 rounded text-sm transition-all ${
+                          activeView === "errors"
+                            ? "bg-red-900/30 text-red-300 border border-red-800/30"
+                            : "text-gray-400 hover:bg-gray-800/50"
+                        }`}
+                      >
+                        <span className="mr-2">⚠</span>Errors
+                      </button>
+                    </div>
+
                     {/* Fleet status */}
                     <div className="flex-1 overflow-hidden flex flex-col border-t border-gray-800 mt-2">
                       <Sidebar heartbeats={heartbeats} />
@@ -1336,7 +1527,9 @@
 
               {/* ── CENTER CONTENT ── */}
               <div className="flex-1 flex flex-col min-w-0 py-2">
-                {activeView === "emails" ? (
+                {activeView === "errors" ? (
+                  <ErrorPanel events={actions} />
+                ) : activeView === "emails" ? (
                   <EmailView actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />
                 ) : (
                   <ChatWindow
