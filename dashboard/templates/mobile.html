@@ -365,6 +365,9 @@
       function normalizeRecipient(raw) {
         return (raw || "").replace(/^inbox:/i, "").trim();
       }
+      function isHumanAgent(name) {
+        return (name || "").toLowerCase().startsWith("human-");
+      }
       function isAbeAgent(name) {
         return (name || "").toLowerCase().startsWith("abe-");
       }
@@ -413,8 +416,8 @@
               emails.forEach(e => {
                   const sender = normalizeRecipient(e.agent);
                   const recip = normalizeRecipient(e.action?.recipient);
-                  if (!isAbeAgent(sender)) set.add(sender);
-                  if (!isAbeAgent(recip)) set.add(recip);
+                  if (!isAbeAgent(sender) && !isHumanAgent(sender)) set.add(sender);
+                  if (!isAbeAgent(recip) && !isHumanAgent(recip)) set.add(recip);
               });
               return [...set].sort();
           }, [emails]);
@@ -424,6 +427,11 @@
               if (selectedInbox === "abe") {
                   return emails.filter(e =>
                       isAbeAgent(normalizeRecipient(e.agent)) && isAbeAgent(normalizeRecipient(e.action?.recipient))
+                  );
+              }
+              if (selectedInbox === "human") {
+                  return emails.filter(e =>
+                      isHumanAgent(normalizeRecipient(e.agent)) || isHumanAgent(normalizeRecipient(e.action?.recipient))
                   );
               }
               return emails.filter(e => {
@@ -452,6 +460,7 @@
                      >
                          <option value="all">All</option>
                          <option value="abe">Internal (Abe Fleet)</option>
+                         <option value="human">Human Operators</option>
                          {entities.map(name => (
                              <option key={name} value={name}>{name}</option>
                          ))}

@@ -246,7 +246,7 @@ async def websocket_endpoint(websocket: WebSocket):
             
             count = 0
             email_counts_per_inbox = {}  # recipient -> count of deep-scan emails sent
-            EMAIL_DEEP_SCAN_LIMIT = 25
+            EMAIL_DEEP_SCAN_LIMIT = 50
             error_count = 0
             ERROR_DEEP_SCAN_LIMIT = 100
             ERROR_STATUSES = {"error", "self_correcting", "interrupted", "failed"}
