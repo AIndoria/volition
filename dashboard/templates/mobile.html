@@ -584,7 +584,7 @@
           return r.error || r.message || (entry.reasoning?.startsWith('Error:') ? entry.reasoning : null) || 'Unknown error';
       };
 
-      const MobileActivity = ({ actions, digests }) => {
+      const MobileActivity = ({ actions, digests, tokenUsage }) => {
           const [subTab, setSubTab] = useState("logs");
           const bottomRef = useRef(null);
           useEffect(() => {
@@ -605,51 +605,56 @@
 
           return (
               <div className="flex flex-col h-full bg-gray-900">
-                  <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
-                      {subTab === 'logs' ? (
-                          <div className="space-y-2">
-                              {dedupedActions.map((e, i) => {
-                                  try {
-                                    const entry = JSON.parse(e.data.entry || "{}");
-                                    const statusColor = entry.status === "completed" ? "text-green-400" : ["error", "failed", "self_correcting", "interrupted"].includes(entry.status) ? "text-red-400" : "text-yellow-400";
-                                    return (
-                                        <div key={i} className="bg-gray-800/30 border-l-2 border-gray-600 p-2 text-xs rounded-r">
-                                            <div className="flex justify-between mb-1">
-                                                <span className="font-bold text-blue-300">{entry.agent}</span>
-                                                <span className="text-gray-500">{formatTime(entry.timestamp_intent)}</span>
+                  {subTab === 'tokens' ? (
+                      <MobileTokenUsage entries={tokenUsage} />
+                  ) : (
+                      <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
+                          {subTab === 'logs' ? (
+                              <div className="space-y-2">
+                                  {dedupedActions.map((e, i) => {
+                                      try {
+                                        const entry = JSON.parse(e.data.entry || "{}");
+                                        const statusColor = entry.status === "completed" ? "text-green-400" : ["error", "failed", "self_correcting", "interrupted"].includes(entry.status) ? "text-red-400" : "text-yellow-400";
+                                        return (
+                                            <div key={i} className="bg-gray-800/30 border-l-2 border-gray-600 p-2 text-xs rounded-r">
+                                                <div className="flex justify-between mb-1">
+                                                    <span className="font-bold text-blue-300">{entry.agent}</span>
+                                                    <span className="text-gray-500">{formatTime(entry.timestamp_intent)}</span>
+                                                </div>
+                                                <div className={`${statusColor} font-bold`}>{entry.action?.tool || "Unknown"}</div>
+                                                {entry.reasoning && <div className="text-gray-400 italic mt-1 pl-1 border-l border-gray-700">"{entry.reasoning}"</div>}
                                             </div>
-                                            <div className={`${statusColor} font-bold`}>{entry.action?.tool || "Unknown"}</div>
-                                            {entry.reasoning && <div className="text-gray-400 italic mt-1 pl-1 border-l border-gray-700">"{entry.reasoning}"</div>}
-                                        </div>
-                                    )
-                                  } catch { return null; }
-                              })}
-                          </div>
-                      ) : (
-                          <div className="space-y-2">
-                              {digests.map((d, i) => {
-                                  try {
-                                      const data = d.data || {};
-                                      return (
-                                          <div key={i} className="bg-gray-800 border border-gray-700 rounded p-3 text-xs">
-                                              <div className="text-gray-500 mb-1 flex justify-between">
-                                                  <span>Ambient Burst</span>
-                                                  <span>{formatTime(data.generated_at)}</span>
+                                        )
+                                      } catch { return null; }
+                                  })}
+                              </div>
+                          ) : (
+                              <div className="space-y-2">
+                                  {digests.map((d, i) => {
+                                      try {
+                                          const data = d.data || {};
+                                          return (
+                                              <div key={i} className="bg-gray-800 border border-gray-700 rounded p-3 text-xs">
+                                                  <div className="text-gray-500 mb-1 flex justify-between">
+                                                      <span>Ambient Burst</span>
+                                                      <span>{formatTime(data.generated_at)}</span>
+                                                  </div>
+                                                  <div className="text-gray-200 italic leading-relaxed">"{data.summary}"</div>
                                               </div>
-                                              <div className="text-gray-200 italic leading-relaxed">"{data.summary}"</div>
-                                          </div>
-                                      )
-                                  } catch { return null; }
-                              })}
-                          </div>
-                      )}
-                      <div ref={bottomRef} />
-                  </div>
+                                          )
+                                      } catch { return null; }
+                                  })}
+                              </div>
+                          )}
+                          <div ref={bottomRef} />
+                      </div>
+                  )}
 
                   {/* Bottom Sub-Tabs */}
-                  <div className="grid grid-cols-2 bg-gray-800 border-t border-gray-700">
+                  <div className="grid grid-cols-3 bg-gray-800 border-t border-gray-700">
                      <button onClick={()=>setSubTab("logs")} className={`py-3 text-xs font-bold uppercase ${subTab==='logs' ? 'text-blue-400 border-t-2 border-blue-400 bg-gray-800' : 'text-gray-500 bg-gray-900'}`}>Action Logs</button>
                      <button onClick={()=>setSubTab("digests")} className={`py-3 text-xs font-bold uppercase ${subTab==='digests' ? 'text-blue-400 border-t-2 border-blue-400 bg-gray-800' : 'text-gray-500 bg-gray-900'}`}>Digests</button>
+                     <button onClick={()=>setSubTab("tokens")} className={`py-3 text-xs font-bold uppercase ${subTab==='tokens' ? 'text-blue-400 border-t-2 border-blue-400 bg-gray-800' : 'text-gray-500 bg-gray-900'}`}>Tokens</button>
                  </div>
               </div>
           );
@@ -836,12 +841,12 @@
                                return [...prev, msg].sort((a,b) => {
                                    const ta = JSON.parse(a.data.entry||"{}").timestamp_intent || "";
                                    const tb = JSON.parse(b.data.entry||"{}").timestamp_intent || "";
-                                   return tb.localeCompare(ta);
-                               }).slice(0, 300);
+                                   return ta.localeCompare(tb);
+                               }).slice(-300);
                            });
                        }
                        else if (msg.stream === "volition:social_digests") {
-                           setDigests(prev => [...prev.filter(p=>p.id!==msg.id), msg].sort((a,b) => (b.data.generated_at||"").localeCompare(a.data.generated_at||"")).slice(0,20));
+                           setDigests(prev => [...prev.filter(p=>p.id!==msg.id), msg].sort((a,b) => (a.data.generated_at||"").localeCompare(b.data.generated_at||"")).slice(-20));
                        }
                        else if (msg.stream === "volition:token_usage") {
                            setTokenUsage(prev => [...prev.slice(-200), msg]);
@@ -929,8 +934,7 @@
                     )}
                     {activeTab === 'uplink' && <MobileUplink actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />}
                     {activeTab === 'fleet' && <MobileFleet heartbeats={heartbeats} />}
-                    {activeTab === 'activity' && <MobileActivity actions={actions} digests={digests} />}
-                    {activeTab === 'tokens' && <MobileTokenUsage entries={tokenUsage} />}
+                    {activeTab === 'activity' && <MobileActivity actions={actions} digests={digests} tokenUsage={tokenUsage} />}
                     {activeTab === 'errors' && <MobileErrorView actions={actions} />}
                 </SafeRender>
             </div>
@@ -952,10 +956,6 @@
                 <button onClick={() => setActiveTab('activity')} className={`flex flex-col items-center gap-1 p-2 w-full ${activeTab==='activity' ? 'text-blue-400' : 'text-gray-500'}`}>
                     <Icons.Activity />
                     <span className="text-[10px] font-bold">Activity</span>
-                </button>
-                <button onClick={() => setActiveTab('tokens')} className={`flex flex-col items-center gap-1 p-2 w-full ${activeTab==='tokens' ? 'text-blue-400' : 'text-gray-500'}`}>
-                    <Icons.Tokens />
-                    <span className="text-[10px] font-bold">Tokens</span>
                 </button>
                 <button onClick={() => setActiveTab('errors')} className={`flex flex-col items-center gap-1 p-2 w-full ${activeTab==='errors' ? 'text-red-400' : 'text-gray-500'}`}>
                     <Icons.Errors />
