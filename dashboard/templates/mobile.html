@@ -167,6 +167,26 @@
         el.style.height = el.scrollHeight + "px";
       };
 
+      const useAutoScroll = (deps) => {
+        const containerRef = useRef(null);
+        const isNearBottom = useRef(true);
+        useEffect(() => {
+          const el = containerRef.current;
+          if (!el) return;
+          const onScroll = () => {
+            isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+          };
+          el.addEventListener("scroll", onScroll);
+          return () => el.removeEventListener("scroll", onScroll);
+        }, []);
+        useEffect(() => {
+          if (isNearBottom.current && containerRef.current) {
+            containerRef.current.scrollTo({ top: containerRef.current.scrollHeight, behavior: "smooth" });
+          }
+        }, deps);
+        return containerRef;
+      };
+
       const MentionPopup = ({ visible, agents, selectedIndex, onSelect, anchorRef }) => {
         const [coords, setCoords] = React.useState({ top: 0, left: 0, width: 224 });
         React.useLayoutEffect(() => {
@@ -226,7 +246,7 @@
 
       const MobileChat = ({ channel, messages, onSend, identity, heartbeats }) => {
         const [input, setInput] = useState("");
-        const bottomRef = useRef(null);
+        const containerRef = useAutoScroll([messages]);
         const inputRef = useRef(null);
 
         const agents = useMemo(() => {
@@ -238,9 +258,6 @@
         const mention = useAtMention(agents, inputRef, setInput);
         const cursorPosRef = useRef(null);
 
-        useEffect(() => {
-             if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
-        }, [messages]);
 
         React.useLayoutEffect(() => {
           if (inputRef.current) autoResize(inputRef.current);
@@ -278,7 +295,7 @@
 
         return (
           <div className="flex flex-col h-full bg-gray-900">
-             <div className="flex-1 overflow-y-auto p-3 space-y-3 pb-4 no-scrollbar">
+             <div ref={containerRef} className="flex-1 overflow-y-auto p-3 space-y-3 pb-4 no-scrollbar">
                 {messages.map((m, i) => {
                     const data = m?.data || {};
                     const from = data.from || "Unknown";
@@ -297,9 +314,8 @@
                         </div>
                     );
                 })}
-                <div ref={bottomRef} />
              </div>
-             
+
              <div className="p-2 bg-gray-800 border-t border-gray-700">
                  <form onSubmit={handleSubmit} className="flex gap-2 relative">
                      <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} anchorRef={inputRef} />
@@ -517,10 +533,7 @@
       };
 
       const MobileTokenUsage = ({ entries }) => {
-          const bottomRef = useRef(null);
-          useEffect(() => {
-              if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
-          }, [entries]);
+          const containerRef = useAutoScroll([entries]);
 
           const utilizationColor = (pct) => {
               const p = parseFloat(pct);
@@ -530,7 +543,7 @@
           };
 
           return (
-              <div className="p-2 overflow-y-auto h-full space-y-2 no-scrollbar font-mono">
+              <div ref={containerRef} className="p-2 overflow-y-auto h-full space-y-2 no-scrollbar font-mono">
                   <h2 className="text-gray-500 text-xs font-bold uppercase tracking-wider mb-3">Token Usage</h2>
                   {entries.length === 0 && <div className="text-gray-600 text-center py-10 text-sm">No token data yet.</div>}
                   {entries.map((e, i) => {
@@ -565,7 +578,6 @@
                           </div>
                       );
                   })}
-                  <div ref={bottomRef} />
               </div>
           );
       };
@@ -586,10 +598,7 @@
 
       const MobileActivity = ({ actions, digests, tokenUsage }) => {
           const [subTab, setSubTab] = useState("logs");
-          const bottomRef = useRef(null);
-          useEffect(() => {
-              if (bottomRef.current) bottomRef.current.scrollIntoView({ behavior: "smooth" });
-          }, [actions, digests]);
+          const containerRef = useAutoScroll([actions, digests]);
 
           const dedupedActions = useMemo(() => {
               const seen = new Map();
@@ -608,7 +617,7 @@
                   {subTab === 'tokens' ? (
                       <MobileTokenUsage entries={tokenUsage} />
                   ) : (
-                      <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
+                      <div ref={containerRef} className="flex-1 overflow-y-auto p-2 no-scrollbar">
                           {subTab === 'logs' ? (
                               <div className="space-y-2">
                                   {dedupedActions.map((e, i) => {
@@ -646,7 +655,6 @@
                                   })}
                               </div>
                           )}
-                          <div ref={bottomRef} />
                       </div>
                   )}
 

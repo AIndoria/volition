@@ -299,6 +299,26 @@
         el.style.height = el.scrollHeight + "px";
       };
 
+      const useAutoScroll = (deps) => {
+        const containerRef = useRef(null);
+        const isNearBottom = useRef(true);
+        useEffect(() => {
+          const el = containerRef.current;
+          if (!el) return;
+          const onScroll = () => {
+            isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+          };
+          el.addEventListener("scroll", onScroll);
+          return () => el.removeEventListener("scroll", onScroll);
+        }, []);
+        useEffect(() => {
+          if (isNearBottom.current && containerRef.current) {
+            containerRef.current.scrollTo({ top: containerRef.current.scrollHeight, behavior: "smooth" });
+          }
+        }, deps);
+        return containerRef;
+      };
+
       const ResizeHandle = ({ onMouseDown, onDoubleClick, hidden }) => {
         if (hidden) return null;
         return (
@@ -657,11 +677,7 @@
       };
 
       const TokenUsagePanel = ({ entries }) => {
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [entries]
-        );
+        const containerRef = useAutoScroll([entries]);
 
         const utilizationColor = (pct) => {
           const p = parseFloat(pct);
@@ -676,7 +692,7 @@
               <span>Token Usage</span>
               <span className="text-[10px] opacity-50">{entries.length}</span>
             </h2>
-            <div className="flex-1 overflow-y-auto space-y-1 font-mono scrollbar-thin">
+            <div ref={containerRef} className="flex-1 overflow-y-auto space-y-1 font-mono scrollbar-thin">
               {entries.map((e, i) => {
                 const d = e.data || {};
                 const pct = parseFloat(d.utilization_pct || 0);
@@ -709,18 +725,13 @@
                   </div>
                 );
               })}
-              <div ref={bottomRef} />
             </div>
           </div>
         );
       };
 
       const DigestPanel = ({ digests }) => {
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [digests]
-        );
+        const containerRef = useAutoScroll([digests]);
 
         // Robust parser for the "Serialization Trap"
         const parseParticipants = (raw) => {
@@ -745,7 +756,7 @@
               <span>Ambient Messages</span>
               <span className="text-[10px] opacity-50">{digests.length}</span>
             </h2>
-            <div className="flex-1 overflow-y-auto space-y-3 font-sans scrollbar-thin">
+            <div ref={containerRef} className="flex-1 overflow-y-auto space-y-3 font-sans scrollbar-thin">
               {digests.map((d, i) => {
                 const data = d.data || {};
                 const participants = parseParticipants(data.participants);
@@ -773,18 +784,13 @@
                 );
               })}
               {digests.length === 0 && <div className="text-xs text-gray-600 text-center italic mt-10">No bursts detected yet.</div>}
-              <div ref={bottomRef} />
             </div>
           </div>
         );
       };
 
       const ActionLog = ({ events }) => {
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [events]
-        );
+        const containerRef = useAutoScroll([events]);
         const dedupedEvents = useMemo(() => {
           const seen = new Map();
           // Process in reverse so "completed" (written later) is seen first
@@ -805,7 +811,7 @@
             <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1">
               Action Log
             </h2>
-            <div className="flex-1 overflow-y-auto space-y-3 font-mono text-xs scrollbar-thin">
+            <div ref={containerRef} className="flex-1 overflow-y-auto space-y-3 font-mono text-xs scrollbar-thin">
               {dedupedEvents.map((e, i) => {
                 let entry = {};
                 try {
@@ -855,7 +861,6 @@
                   </div>
                 );
               })}
-              <div ref={bottomRef} />
             </div>
           </div>
         );
@@ -876,7 +881,6 @@
       };
 
       const ErrorPanel = ({ events }) => {
-        const bottomRef = useRef(null);
         const [filterType, setFilterType] = useState("all");
         const [filterAgent, setFilterAgent] = useState("all");
         const [filterText, setFilterText] = useState("");
@@ -925,10 +929,7 @@
           });
         }, [allErrors, filterType, filterAgent, filterText]);
 
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [filteredErrors]
-        );
+        const containerRef = useAutoScroll([filteredErrors]);
 
         const statusBadge = (status) => {
           if (status === 'error' || status === 'failed')
@@ -986,7 +987,7 @@
             </div>
 
             {/* Error List */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs scrollbar-thin">
+            <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs scrollbar-thin">
               {filteredErrors.length === 0 && (
                 <div className="text-gray-600 text-center italic mt-10">
                   {allErrors.length === 0 ? "No errors detected." : "No errors match the current filters."}
@@ -1020,7 +1021,6 @@
                   )}
                 </div>
               ))}
-              <div ref={bottomRef} />
             </div>
           </div>
         );
@@ -1028,12 +1028,8 @@
 
       const ChatWindow = ({ channel, messages, onSend, identity, heartbeats }) => {
         const [input, setInput] = useState("");
-        const bottomRef = useRef(null);
+        const containerRef = useAutoScroll([messages]);
         const inputRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [messages]
-        );
 
         const agents = useMemo(() => {
           const names = new Set();
@@ -1092,7 +1088,7 @@
                 </span>
               )}
             </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
+            <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
               {messages.map((m, i) => {
                 const isMe = m.data.from === identity || m.data.from === HUMAN_NAME;
                 return (
@@ -1124,7 +1120,6 @@
                   </div>
                 );
               })}
-              <div ref={bottomRef} />
             </div>
             <form
               onSubmit={handleSubmit}
