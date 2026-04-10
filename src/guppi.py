@@ -1087,7 +1087,7 @@ class GuppiDaemon:
                 except Exception as e:
                     logger.error(f"Failed to write stub: {e}")
             return # <--- EXIT without Thinking
-
+        
         # B. Silent Scribe / Background Tasks
         if meta.get("maintenance") is True:
             if meta.get("is_auto_prune"):
@@ -1135,7 +1135,17 @@ class GuppiDaemon:
                     logger.warning(f"Failed to clean up temp prompt file {prompt_file}: {e}")
             return # <--- EXIT without Thinking
 
-
+        # B2. Scribe Failure Detection
+        event_type_b = norm["observed"].get("event_type", norm["observed"].get("event", ""))
+        if event_type_b == "ScribeFailed":
+            content_str = str(norm["observed"].get("content", ""))
+            source_file = meta.get("source_tier_1", "unknown")
+            await self.log_guppi_event(
+                "ScribeFailed",
+                f"Scribe failed for {source_file}: {content_str[:200]}",
+                source="GUPPI:Background"
+            )
+            return  # EXIT without Thinking
         # 5. THINKING TRIGGER (The 7.2.3 Safety)
         # We pass norm["observed"] (The Envelope) so the LLM sees 'from', 'meta', and 'raw'.
         # GPT hates this because it's "messy", but it prevents context loss.
@@ -1473,7 +1483,7 @@ class GuppiDaemon:
             event_type = event_data.get("event")
             is_chat = (event_type == "Chat")
             
-            if force_model:
+            if force_model is not None:
                 model = force_model
                 is_flash = (model == MODEL_FLASH)
             else:
@@ -1528,7 +1538,7 @@ class GuppiDaemon:
             tool = action.get("tool")
 
             # Implicit Escalation
-            if is_flash and tool in FLASH_FORBIDDEN_TOOLS:
+            if is_flash and tool in FLASH_FORBIDDEN_TOOLS and force_model is None:
                 logger.warning(f"ESCALATION: Flash attempted {tool}. Waking Pro.")
                 await self.log_guppi_event("EscalationTrigger", f"Denied Flash tool: {tool}")
 
@@ -1684,9 +1694,22 @@ class GuppiDaemon:
 
     def _clean_json(self, text_response, thought_sig=None):
         try:
-            match = re.search(r'\{.*\}', text_response, re.DOTALL)
-            clean_json = match.group(0) if match else text_response
-            parsed = json.loads(clean_json)
+            content = text_response.strip()
+            match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
+            if match:
+                content = match.group(1).strip()
+            parsed = json.loads(content)
+
+            # Guard: IF LLM sometimes returns a JSON array instead of an object
+            if isinstance(parsed, list):
+                candidates = [
+                    x for x in parsed
+                    if isinstance(x, dict) and ("action" in x or "reasoning" in x)
+                ]
+                if len(candidates) == 1:
+                    parsed = candidates[0]
+                else:
+                    raise LLMOutputError("Ambiguous or invalid JSON array from LLM")
 
             # Active Decontamination
             keys_to_scrub = ["thought_signature", "thoughtSignature"]

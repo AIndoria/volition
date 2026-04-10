@@ -113,7 +113,7 @@ async def run_llm_generation(model_name: str, prompt_text: str) -> str:
 
     async with aiohttp.ClientSession() as session:
         # Bumped timeout to 1200s (20 mins) specifically to account for Nanbeige's deep thinking
-        async with session.post(url, headers=headers, json=payload, timeout=1200) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
             if resp.status != 200:
                 err = await resp.text()
                 raise Exception(f"API Error {resp.status}: {err}")
