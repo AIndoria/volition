@@ -50,7 +50,7 @@ class SafeShell:
         "ls", "cat", "grep", "head", "tail", "find", 
         "stat", "df", "du", "whoami", "date", "echo", 
         "awk", "sed", "cut", "sort", "uniq", "wc", "uptime", "free",
-        "systemctl", "journalctl", "sudo"
+        "journalctl"
     ]
 
     FORBIDDEN_FLAGS = ["-i", "su"]
@@ -168,7 +168,7 @@ YOUR DIRECTIVE: {self.directive}
 
 TOOLS AVAILABLE:
 1. execute_shell: Run a shell command. 
-   - CONSTRAINTS: READ-ONLY. Allowed: ls, cat, grep, find, head, tail, df, du.
+   - CONSTRAINTS: READ-ONLY. Allowed: ls, cat, grep, find, head, tail, df, du, journalctl.
    - FORBIDDEN: rm, mv, cp, nano, vim, sed -i, > redirection, sudo.
    - If the user asks for a fix, INVESTIGATE first, then propose the fix in your final report. DO NOT execute it.
 
@@ -199,64 +199,70 @@ PROTOCOL:
                     temperature=0.1 # Low temp for precise logic
                 )
                 msg = response.choices[0].message
+                # Normalize assistant message into a plain dict for history so it doesn't crash turn 2
+                assistant_entry = {
+                    "role": msg.role,
+                    "content": msg.content,
+                }
+
+                # --- INLINE JSON FALLBACK INTERCEPTOR ---
+                if not getattr(msg, "tool_calls", None) and msg.content:
+                    content_str = msg.content.strip()
+                    try:
+                        # 1. Look for fenced JSON anywhere in the response
+                        match = re.search(r"```(?:json)?\s*(.*?)\s*```", content_str, re.DOTALL)
+                        if match:
+                            json_str = match.group(1).strip()
+                        else:
+                            # 2. Fallback: assume entire content is JSON
+                            json_str = content_str
+
+                        parsed_content = json.loads(json_str)
+
+                        if (
+                            isinstance(parsed_content, dict)
+                            and "name" in parsed_content
+                            and "arguments" in parsed_content
+                        ):
+                            logger.info("Intercepted inline JSON tool call. Normalizing.")
+
+                            assistant_entry["tool_calls"] = [{
+                                "id": f"call_fallback_{turn}",
+                                "type": "function",
+                                "function": {
+                                    "name": parsed_content["name"],
+                                    "arguments": json.dumps(parsed_content["arguments"])
+                                }
+                            }]
+
+                            # Avoid double signal in context
+                            assistant_entry["content"] = ""
+
+                    except Exception as e:
+                        logger.debug(f"Inline JSON parse failed: {e}")
+                # Native tool call handling
+                elif getattr(msg, "tool_calls", None):
+                    assistant_entry["tool_calls"] = [
+                        {
+                            "id": tc.id,
+                            "type": tc.type,
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            }
+                        } for tc in msg.tool_calls
+                    ]
+                self.history.append(assistant_entry)
             except Exception as e:
                 self._report_failure(f"LLM API Failure: {e}")
                 return
 
-            # Normalize assistant message into a plain dict for history
-            assistant_entry = {
-                "role": msg.role,
-                "content": msg.content,
-            }
-            
-            # --- OLLAMA FALLBACK INTERCEPTOR ---
-            # If native tool_calls is empty, check if it dumped JSON directly into content
-            if not getattr(msg, "tool_calls", None) and msg.content:
-                content_str = msg.content.strip()
-                try:
-                    # Strip markdown code blocks if the LLM wrapped it
-                    if content_str.startswith("```json"): 
-                        content_str = content_str[7:-3].strip()
-                    elif content_str.startswith("```"): 
-                        content_str = content_str[3:-3].strip()
-                    
-                    parsed_content = json.loads(content_str)
-                    if isinstance(parsed_content, dict) and "name" in parsed_content and "arguments" in parsed_content:
-                        logger.info("Intercepted inline JSON tool call. Normalizing.")
-                        # Fake the tool call structure so the rest of the loop understands it
-                        assistant_entry["tool_calls"] = [{
-                            "id": f"call_fallback_{turn}",
-                            "type": "function",
-                            "function": {
-                                "name": parsed_content["name"],
-                                "arguments": json.dumps(parsed_content["arguments"])
-                            }
-                        }]
-                        assistant_entry["content"] = "" # Blank out content to avoid confusing the context
-                except Exception:
-                    pass # Not JSON, just regular chatting
-            
-            # Native tool call handling
-            elif getattr(msg, "tool_calls", None):
-                assistant_entry["tool_calls"] = [
-                    {
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments,
-                        }
-                    } for tc in msg.tool_calls
-                ]
-            
-            self.history.append(assistant_entry)
-
-            # 2. Check for Tool Calls (Using our normalized entry!)
+            # 2. Check for Tool Calls (Using normalized entry)
             if "tool_calls" in assistant_entry:
                 for tool_call in assistant_entry["tool_calls"]:
                     func_name = tool_call["function"]["name"]
                     call_id = tool_call["id"]
-                    
+
                     try:
                         args = json.loads(tool_call["function"]["arguments"])
                     except json.JSONDecodeError:
@@ -276,12 +282,13 @@ PROTOCOL:
 
                     elif func_name == "execute_shell":
                         cmd = args.get("command")
+
                         if not isinstance(cmd, str) or not cmd.strip():
                             output = "ERROR: Missing or empty 'command' argument for execute_shell tool."
                             logger.error(output)
                         else:
                             output = self.shell.execute(cmd)
-                        
+
                         if self.debug_mode:
                             print(f"\n--- CMD OUT ---\n{output}\n---------------")
 
@@ -289,14 +296,16 @@ PROTOCOL:
                         self.history.append({
                             "role": "tool",
                             "tool_call_id": call_id,
+                            "tool_call_id": call_id,
                             "content": output
                         })
+
             else:
                 # If LLM talks without tools, just push it back as user prompt to force action
                 content = assistant_entry.get("content") or ""
                 logger.warning(f"LLM replied without tools: {content[:50]}...")
                 self.history.append({
-                    "role": "user", 
+                    "role": "user",
                     "content": "You must use a tool to proceed (execute_shell) or end the session (finish_investigation)."
                 })
 
