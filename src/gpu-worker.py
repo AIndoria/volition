@@ -22,6 +22,7 @@ import sys
 import logging
 import aiohttp
 import redis.asyncio as redis
+from datetime import datetime
 from typing import Dict, Any, Optional
 
 # --- Configuration ---
@@ -44,6 +45,13 @@ MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "mistral")
 
 EMBEDDING_BACKEND = os.environ.get("EMBEDDING_BACKEND", "ollama").lower()
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+
+CONTEXT_LIMITS = {
+    "google/gemini-embedding-001": 8_192,
+    "mistral": 32_768,
+    "nomic-embed-text": 8_192,
+}
+DEFAULT_CONTEXT_LIMIT = 32_768
 OPENROUTER_MODEL_EMBED = os.environ.get(
     "OPENROUTER_MODEL_EMBED",
     "google/gemini-embedding-001"
@@ -70,7 +78,7 @@ async def check_ollama_status():
         return False
     return False
 
-async def run_embedding(session: aiohttp.ClientSession, text: str) -> Optional[list]:
+async def run_embedding(session: aiohttp.ClientSession, text: str, r: redis.Redis = None) -> Optional[list]:
     """Calls Ollama to generate a vector embedding."""
     payload = {
         "model": MODEL_EMBED,
@@ -83,12 +91,30 @@ async def run_embedding(session: aiohttp.ClientSession, text: str) -> Optional[l
                 logger.error(f"Embedding failed ({resp.status}): {err}")
                 return None
             data = await resp.json()
+            if r:
+                try:
+                    prompt_toks = data.get("prompt_eval_count", 0) or 0
+                    if prompt_toks > 0:
+                        ctx_limit = CONTEXT_LIMITS.get(MODEL_EMBED, DEFAULT_CONTEXT_LIMIT)
+                        await r.xadd("volition:token_usage", {
+                            "source": "gpu-worker",
+                            "agent": "gpu-worker",
+                            "model": MODEL_EMBED,
+                            "prompt_tokens": str(prompt_toks),
+                            "completion_tokens": "0",
+                            "total_tokens": str(prompt_toks),
+                            "context_limit": str(ctx_limit),
+                            "utilization_pct": f"{(prompt_toks / ctx_limit) * 100:.1f}",
+                            "ts": datetime.utcnow().isoformat()
+                        })
+                except Exception:
+                    pass
             return data.get("embedding")
     except Exception as e:
         logger.error(f"Embedding exception: {e}")
         return None
 
-async def run_embedding_openrouter(session: aiohttp.ClientSession, text: str) -> Optional[list]:
+async def run_embedding_openrouter(session: aiohttp.ClientSession, text: str, r: redis.Redis = None) -> Optional[list]:
     if not OPENROUTER_API_KEY:
         logger.error("OPENROUTER_API_KEY not set for openrouter embedding")
         return None
@@ -115,6 +141,24 @@ async def run_embedding_openrouter(session: aiohttp.ClientSession, text: str) ->
                 return None
 
             data = await resp.json()
+            usage = data.get("usage", {})
+            if usage and r:
+                try:
+                    ctx_limit = CONTEXT_LIMITS.get(OPENROUTER_MODEL_EMBED, DEFAULT_CONTEXT_LIMIT)
+                    total = usage.get("total_tokens", 0) or 0
+                    await r.xadd("volition:token_usage", {
+                        "source": "gpu-worker",
+                        "agent": "gpu-worker",
+                        "model": OPENROUTER_MODEL_EMBED,
+                        "prompt_tokens": str(usage.get("prompt_tokens", 0) or 0),
+                        "completion_tokens": "0",
+                        "total_tokens": str(total),
+                        "context_limit": str(ctx_limit),
+                        "utilization_pct": f"{(total / ctx_limit) * 100:.1f}",
+                        "ts": datetime.utcnow().isoformat()
+                    })
+                except Exception:
+                    pass
             return data["data"][0]["embedding"]
 
     except Exception as e:
@@ -122,7 +166,7 @@ async def run_embedding_openrouter(session: aiohttp.ClientSession, text: str) ->
         return None
 
 
-async def run_summary(session: aiohttp.ClientSession, text: str) -> Optional[str]:
+async def run_summary(session: aiohttp.ClientSession, text: str, r: redis.Redis = None) -> Optional[str]:
     """Calls Ollama to generate a summary."""
     # Context window management is up to the model, but we keep the prompt simple.
     prompt = f"Summarize the following text concisely, focusing on key events and technical details:\n\n{text}"
@@ -141,6 +185,26 @@ async def run_summary(session: aiohttp.ClientSession, text: str) -> Optional[str
                 logger.error(f"Summary failed ({resp.status}): {err}")
                 return None
             data = await resp.json()
+            if r:
+                try:
+                    prompt_toks = data.get("prompt_eval_count", 0) or 0
+                    comp_toks = data.get("eval_count", 0) or 0
+                    total = prompt_toks + comp_toks
+                    if total > 0:
+                        ctx_limit = CONTEXT_LIMITS.get(MODEL_SUMMARIZE, DEFAULT_CONTEXT_LIMIT)
+                        await r.xadd("volition:token_usage", {
+                            "source": "gpu-worker",
+                            "agent": "gpu-worker",
+                            "model": MODEL_SUMMARIZE,
+                            "prompt_tokens": str(prompt_toks),
+                            "completion_tokens": str(comp_toks),
+                            "total_tokens": str(total),
+                            "context_limit": str(ctx_limit),
+                            "utilization_pct": f"{(total / ctx_limit) * 100:.1f}",
+                            "ts": datetime.utcnow().isoformat()
+                        })
+                except Exception:
+                    pass
             return data.get("response")
     except Exception as e:
         logger.error(f"Summary exception: {e}")
@@ -171,10 +235,10 @@ async def process_task(r: redis.Redis, session: aiohttp.ClientSession, raw_task:
     else:
         if task_type == "embed":
             if EMBEDDING_BACKEND == "openrouter":
-                vector = await run_embedding_openrouter(session, content)
+                vector = await run_embedding_openrouter(session, content, r=r)
                 backend_name = OPENROUTER_MODEL_EMBED
             else:
-                vector = await run_embedding(session, content)
+                vector = await run_embedding(session, content, r=r)
                 backend_name = MODEL_EMBED
 
             if vector:
@@ -184,7 +248,7 @@ async def process_task(r: redis.Redis, session: aiohttp.ClientSession, raw_task:
 
 
         elif task_type == "summarize":
-            summary = await run_summary(session, content)
+            summary = await run_summary(session, content, r=r)
             if summary:
                 result_data = {"summary": summary}
             else:

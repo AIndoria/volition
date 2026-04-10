@@ -35,6 +35,16 @@ import redis.asyncio as redis
 
 # --- Configuration ---
 DEFAULT_REDIS_URL = os.environ.get("REDIS_URL")
+
+CONTEXT_LIMITS = {
+    "google/gemini-3-flash-preview": 1_048_576,
+    "google/gemini-2.5-flash-preview": 1_048_576,
+    "google/gemini-2.5-pro-preview": 1_048_576,
+    "mistral": 32_768,
+    "qwen-2.5-14b-coder": 32_768,
+    "nanbeige-4.1-3b": 8_192,
+}
+DEFAULT_CONTEXT_LIMIT = 32_768
 VECTOR_DB_PATH = Path(os.environ.get("MEMORY_DIR", "./memory")) / "vector.db"
 
 # v6.4 Provider Config
@@ -76,7 +86,7 @@ async def push_result(redis_url: str, inbox: str, event_type: str, content: Any,
         # If we can't report back, we exit non-zero so GUPPI knows (if it was tracking us)
         sys.exit(1)
 
-async def run_llm_generation(model_name: str, prompt_text: str) -> str:
+async def run_llm_generation(model_name: str, prompt_text: str, redis_url: str = None) -> str:
     """Unified OpenAI-Compatible execution for Scribe."""
     model_id = model_name
     use_thinking = ":thinking" in model_id
@@ -119,6 +129,29 @@ async def run_llm_generation(model_name: str, prompt_text: str) -> str:
                 raise Exception(f"API Error {resp.status}: {err}")
             
             data = await resp.json()
+
+            # Token usage telemetry
+            usage = data.get("usage", {})
+            if usage and redis_url:
+                try:
+                    ctx_limit = CONTEXT_LIMITS.get(actual_model, DEFAULT_CONTEXT_LIMIT)
+                    total = usage.get("total_tokens", 0) or 0
+                    r_telem = redis.from_url(redis_url, decode_responses=True)
+                    await r_telem.xadd("volition:token_usage", {
+                        "source": "scribe",
+                        "agent": "scribe",
+                        "model": actual_model,
+                        "prompt_tokens": str(usage.get("prompt_tokens", 0) or 0),
+                        "completion_tokens": str(usage.get("completion_tokens", 0) or 0),
+                        "total_tokens": str(total),
+                        "context_limit": str(ctx_limit),
+                        "utilization_pct": f"{(total / ctx_limit) * 100:.1f}",
+                        "ts": datetime.utcnow().isoformat()
+                    })
+                    await r_telem.close()
+                except Exception:
+                    pass
+
             message = data["choices"][0]["message"]
             text = message.get("content", "")
             
@@ -186,7 +219,7 @@ async def main():
         # Group analyze with summarize so the LLM actually fires
         if args.mode in ["summarize", "analyze"]:
             # Direct generation via configured provider
-            result_text = await run_llm_generation(args.model, prompt_text)
+            result_text = await run_llm_generation(args.model, prompt_text, redis_url=args.redis_url)
             
             # 4. Report Success
             await push_result(

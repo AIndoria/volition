@@ -8,11 +8,13 @@ Frontend: React (served via static template)
 import asyncio
 import json
 import os
+import re
 import time
 from datetime import datetime
 from typing import List
 
 import redis.asyncio as redis
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,9 +26,15 @@ REDIS_HOST = os.environ.get("REDIS_HOST")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "volition")
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
+HUMAN_NAME = os.environ.get("HUMAN_NAME", "Human-Abe")
 
 # --- APP SETUP ---
-app = FastAPI(title="Volition Command")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    asyncio.create_task(redis_listener())
+    yield
+
+app = FastAPI(title="Volition Command", lifespan=lifespan)
 templates = Jinja2Templates(directory="templates")
 
 # --- ROUTES ---
@@ -34,7 +42,7 @@ templates = Jinja2Templates(directory="templates")
 @app.get("/mobile", response_class=HTMLResponse)
 async def get_mobile(request: Request):
     """Force load the mobile interface."""
-    return templates.TemplateResponse("mobile.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="mobile.html", context={"human_name": HUMAN_NAME})
 
 @app.get("/", response_class=HTMLResponse)
 async def get_dashboard(request: Request):
@@ -44,13 +52,13 @@ async def get_dashboard(request: Request):
     Otherwise, serve the desktop dashboard.
     """
     user_agent = request.headers.get("user-agent", "").lower()
-    
+
     # "Automagic" detection
     if "mobile" in user_agent or "android" in user_agent or "iphone" in user_agent:
-        return templates.TemplateResponse("mobile.html", {"request": request})
-    
+        return templates.TemplateResponse(request=request, name="mobile.html", context={"human_name": HUMAN_NAME})
+
     # Fallback to desktop
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html", context={"human_name": HUMAN_NAME})
 
 # --- REDIS MANAGER ---
 class RedisManager:
@@ -79,7 +87,7 @@ class RedisManager:
         }
         await self.redis.xadd(channel, entry)
 
-    async def send_email(self, target: str, content: str, sender: str = "Human-Abe"):
+    async def send_email(self, target: str, content: str, sender: str = HUMAN_NAME):
         key = f"inbox:{target}"
         msg = {
             "from": sender,
@@ -153,7 +161,8 @@ async def redis_listener():
         "chat:synchronous": "$",
         "volition:action_log": "$",
         "volition:heartbeat": "$",
-        "volition:social_digests": "$"
+        "volition:social_digests": "$",
+        "volition:token_usage": "$"
     }
 
     last_scan = 0
@@ -194,9 +203,6 @@ async def redis_listener():
 
 # --- ROUTES ---
 
-@app.on_event("startup")
-async def startup_event():
-    asyncio.create_task(redis_listener())
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
@@ -239,23 +245,47 @@ async def websocket_endpoint(websocket: WebSocket):
             hist = await rm.redis.xrevrange("volition:action_log", count=2000)
             
             count = 0
-            email_count = 0 
-            
+            email_counts_per_inbox = {}  # recipient -> count of deep-scan emails sent
+            EMAIL_DEEP_SCAN_LIMIT = 50
+            error_count = 0
+            ERROR_DEEP_SCAN_LIMIT = 100
+            ERROR_STATUSES = {"error", "self_correcting", "interrupted", "failed"}
+
             for msg_id, data in hist:
                 should_send = False
-                
+
                 # Rule 1: Always send the most recent 100 events
                 if count < 100:
                     should_send = True
-                
-                # Rule 2: Deep search for emails (Limit to last 15 found)
-                elif email_count < 15: 
+
+                # Rule 2: Deep search for emails and errors beyond recent 100
+                else:
                     try:
                         entry = json.loads(data.get("entry", "{}"))
                         tool = entry.get("action", {}).get("tool")
+
+                        # 2a: Emails (up to 25 per inbox)
                         if tool == "email_send":
-                            should_send = True
-                            email_count += 1
+                            recipient = entry.get("action", {}).get("recipient", "")
+                            inbox = re.sub(r"^inbox:", "", recipient, flags=re.IGNORECASE).strip()
+                            if email_counts_per_inbox.get(inbox, 0) < EMAIL_DEEP_SCAN_LIMIT:
+                                should_send = True
+                                email_counts_per_inbox[inbox] = email_counts_per_inbox.get(inbox, 0) + 1
+
+                        # 2b: Errors (up to 100 total)
+                        if not should_send and error_count < ERROR_DEEP_SCAN_LIMIT:
+                            status = entry.get("status", "")
+                            results = entry.get("results", {}) if isinstance(entry.get("results"), dict) else {}
+                            reasoning = entry.get("reasoning", "")
+                            is_error = (
+                                status in ERROR_STATUSES
+                                or results.get("status") in {"error", "failed"}
+                                or "error" in results
+                                or (isinstance(reasoning, str) and reasoning.startswith("Error:"))
+                            )
+                            if is_error:
+                                should_send = True
+                                error_count += 1
                     except: pass
 
                 if should_send:
@@ -294,12 +324,46 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception as outer_e:
              print(f"Failed to fetch history for volition:social_digests: {outer_e}")
 
+        # 2d. Token Usage
+        try:
+            hist = await rm.get_history("volition:token_usage", 200)
+            for msg_id, data in hist:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "stream_event",
+                        "stream": "volition:token_usage",
+                        "id": msg_id,
+                        "data": data,
+                        "is_history": True
+                    }))
+                except Exception as inner_e:
+                    print(f"Failed to serialize token usage {msg_id}: {inner_e}")
+        except Exception as outer_e:
+            print(f"Failed to fetch history for volition:token_usage: {outer_e}")
+
+        # 2e. Heartbeats (enough to populate all active agents immediately)
+        try:
+            hist = await rm.get_history("volition:heartbeat", 100)
+            for msg_id, data in hist:
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "stream_event",
+                        "stream": "volition:heartbeat",
+                        "id": msg_id,
+                        "data": data,
+                        "is_history": True
+                    }))
+                except Exception as inner_e:
+                    print(f"Failed to serialize heartbeat {msg_id}: {inner_e}")
+        except Exception as outer_e:
+            print(f"Failed to fetch history for volition:heartbeat: {outer_e}")
+
         while True:
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
                 action = msg.get("action")
-                sender = msg.get("sender", "Human-Abe") # Identity Support
+                sender = msg.get("sender", HUMAN_NAME)  # Identity Support
 
                 if action == "post":
                     channel = msg.get("channel")

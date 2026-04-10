@@ -27,6 +27,8 @@
     <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
     <style>
       /* NUCLEAR OPTION for Mobile Layout Stability */
       html, body {
@@ -62,20 +64,155 @@
         -ms-overflow-style: none;
         scrollbar-width: none;
       }
+      .prose.prose-invert a { color: #58a6ff; }
+      .prose.prose-invert code { background: #21262d; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; }
+      .prose.prose-invert pre { background: #21262d; border: 1px solid #30363d; }
+      .prose.prose-invert pre code { background: transparent; padding: 0; }
+      .prose.prose-invert h1,
+      .prose.prose-invert h2,
+      .prose.prose-invert h3 { color: #e6edf3; }
     </style>
   </head>
   <body class="text-white">
     <div id="root"></div>
 
     <script type="text/babel">
+      const HUMAN_NAME = "{{ human_name }}";
       const { useState, useEffect, useRef, useMemo } = React;
       const formatTime = (iso) => {
         if (!iso) return "??:??";
         try {
-          return iso.split("T")[1].substring(0, 5); 
+          return new Date(iso + "Z").toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false});
         } catch {
           return new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         }
+      };
+
+      // --- @MENTION AUTOCOMPLETE ---
+
+      const useAtMention = (agents, inputRef, setValue) => {
+        const [showPopup, setShowPopup] = React.useState(false);
+        const [query, setQuery] = React.useState("");
+        const [selectedIndex, setSelectedIndex] = React.useState(0);
+        const [mentionStart, setMentionStart] = React.useState(-1);
+
+        const filteredAgents = React.useMemo(() => {
+          if (!showPopup) return [];
+          return agents.filter(a => a.toLowerCase().startsWith(query.toLowerCase()));
+        }, [agents, query, showPopup]);
+
+        const dismissPopup = React.useCallback(() => {
+          setShowPopup(false);
+          setQuery("");
+          setSelectedIndex(0);
+          setMentionStart(-1);
+        }, []);
+
+        const handleSelect = React.useCallback((agentName) => {
+          const el = inputRef.current;
+          if (!el) return;
+          const val = el.value;
+          const cursor = el.selectionStart;
+          const newVal = val.slice(0, mentionStart) + "@" + agentName + " " + val.slice(cursor);
+          setValue(newVal);
+          dismissPopup();
+          requestAnimationFrame(() => {
+            const pos = mentionStart + agentName.length + 2;
+            el.setSelectionRange(pos, pos);
+            el.focus();
+          });
+        }, [inputRef, mentionStart, setValue, dismissPopup]);
+
+        const handleInputChange = React.useCallback((e) => {
+          const val = e.target.value;
+          const cursor = e.target.selectionStart;
+          let atPos = -1;
+          for (let i = cursor - 1; i >= 0; i--) {
+            if (val[i] === " " || val[i] === "\n") break;
+            if (val[i] === "@") { atPos = i; break; }
+          }
+          if (atPos !== -1) {
+            const q = val.slice(atPos + 1, cursor);
+            setMentionStart(atPos);
+            setQuery(q);
+            setShowPopup(true);
+            setSelectedIndex(0);
+          } else {
+            dismissPopup();
+          }
+        }, [dismissPopup]);
+
+        const handleKeyDown = React.useCallback((e) => {
+          if (!showPopup || filteredAgents.length === 0) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setSelectedIndex(i => (i + 1) % filteredAgents.length);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setSelectedIndex(i => (i - 1 + filteredAgents.length) % filteredAgents.length);
+          } else if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            handleSelect(filteredAgents[selectedIndex]);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            dismissPopup();
+          }
+        }, [showPopup, filteredAgents, selectedIndex, handleSelect, dismissPopup]);
+
+        return { popupVisible: showPopup && filteredAgents.length > 0, filteredAgents, selectedIndex, handleInputChange, handleKeyDown, handleSelect, dismissPopup };
+      };
+
+      const autoResize = (el) => {
+        el.style.height = "0";
+        el.style.height = el.scrollHeight + "px";
+      };
+
+      const useAutoScroll = (deps) => {
+        const containerRef = useRef(null);
+        const isNearBottom = useRef(true);
+        useEffect(() => {
+          const el = containerRef.current;
+          if (!el) return;
+          const onScroll = () => {
+            isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+          };
+          el.addEventListener("scroll", onScroll);
+          return () => el.removeEventListener("scroll", onScroll);
+        }, []);
+        useEffect(() => {
+          if (isNearBottom.current && containerRef.current) {
+            containerRef.current.scrollTo({ top: containerRef.current.scrollHeight, behavior: "smooth" });
+          }
+        }, deps);
+        return containerRef;
+      };
+
+      const MentionPopup = ({ visible, agents, selectedIndex, onSelect, anchorRef }) => {
+        const [coords, setCoords] = React.useState({ top: 0, left: 0, width: 224 });
+        React.useLayoutEffect(() => {
+          if (!visible || !anchorRef?.current) return;
+          const r = anchorRef.current.getBoundingClientRect();
+          setCoords({ top: r.top + window.scrollY, left: r.left + window.scrollX, width: r.width });
+        }, [visible, anchorRef]);
+        if (!visible) return null;
+        const popupStyle = { position: "absolute", top: coords.top - 4, left: coords.left, width: coords.width, transform: "translateY(-100%)", zIndex: 9999 };
+        return ReactDOM.createPortal(
+          <div
+            style={popupStyle}
+            className="max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg"
+          >
+            {agents.map((name, i) => (
+              <div
+                key={name}
+                onMouseDown={(e) => { e.preventDefault(); onSelect(name); }}
+                className={`px-3 py-1.5 text-sm cursor-pointer ${i === selectedIndex ? "bg-blue-600 text-white" : "text-gray-300 hover:bg-gray-700"}`}
+              >
+                @{name}
+              </div>
+            ))}
+          </div>,
+          document.body
+        );
       };
 
       const Icons = {
@@ -83,7 +220,9 @@
         Fleet: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>,
         Activity: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline></svg>,
         Send: () => <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>,
-        Email: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>
+        Email: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path><polyline points="22,6 12,13 2,6"></polyline></svg>,
+        Tokens: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg>,
+        Errors: () => <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
       };
 
       class SafeRender extends React.Component {
@@ -105,13 +244,28 @@
         }
       }
 
-      const MobileChat = ({ channel, messages, onSend, identity }) => {
+      const MobileChat = ({ channel, messages, onSend, identity, heartbeats }) => {
         const [input, setInput] = useState("");
-        const bottomRef = useRef(null);
-        
-        useEffect(() => {
-             if (bottomRef.current) bottomRef.current.scrollIntoView();
-        }, [messages]);
+        const containerRef = useAutoScroll([messages]);
+        const inputRef = useRef(null);
+
+        const agents = useMemo(() => {
+          const names = new Set();
+          (heartbeats || []).forEach(hb => { if (hb.data?.abe) names.add(hb.data.abe); });
+          return [...names].sort();
+        }, [heartbeats]);
+
+        const mention = useAtMention(agents, inputRef, setInput);
+        const cursorPosRef = useRef(null);
+
+
+        React.useLayoutEffect(() => {
+          if (inputRef.current) autoResize(inputRef.current);
+          if (cursorPosRef.current !== null && inputRef.current) {
+            inputRef.current.setSelectionRange(cursorPosRef.current, cursorPosRef.current);
+            cursorPosRef.current = null;
+          }
+        });
 
         const handleSubmit = (e) => {
           e.preventDefault();
@@ -120,13 +274,32 @@
           setInput("");
         };
 
+        const handleKeyDown = (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            mention.handleKeyDown(e);
+            if (!mention.popupVisible) {
+              e.preventDefault();
+              handleSubmit(e);
+            }
+          } else if (e.key === "Enter" && e.shiftKey) {
+            e.preventDefault();
+            const el = inputRef.current;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            cursorPosRef.current = start + 1;
+            setInput(prev => prev.slice(0, start) + "\n" + prev.slice(end));
+          } else {
+            mention.handleKeyDown(e);
+          }
+        };
+
         return (
           <div className="flex flex-col h-full bg-gray-900">
-             <div className="flex-1 overflow-y-auto p-3 space-y-3 pb-4 no-scrollbar">
+             <div ref={containerRef} className="flex-1 overflow-y-auto p-3 space-y-3 pb-4 no-scrollbar">
                 {messages.map((m, i) => {
                     const data = m?.data || {};
                     const from = data.from || "Unknown";
-                    const isMe = from === identity || from === "Human-Abe" || from === "Human";
+                    const isMe = from === identity || from === HUMAN_NAME || from === "Human";
                     
                     return (
                         <div key={i} className={`flex flex-col ${isMe ? "items-end" : "items-start"}`}>
@@ -141,16 +314,19 @@
                         </div>
                     );
                 })}
-                <div ref={bottomRef} />
              </div>
-             
+
              <div className="p-2 bg-gray-800 border-t border-gray-700">
-                 <form onSubmit={handleSubmit} className="flex gap-2">
-                     <input 
-                        className="flex-1 bg-gray-900 border border-gray-700 rounded-full px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                 <form onSubmit={handleSubmit} className="flex gap-2 relative">
+                     <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} anchorRef={inputRef} />
+                     <textarea
+                        rows="1"
+                        ref={inputRef}
+                        className="flex-1 bg-gray-900 border border-gray-700 rounded-2xl px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500 resize-none overflow-y-auto max-h-32"
                         placeholder={`Message #${channel.replace("chat:", "")}...`}
                         value={input}
-                        onChange={e => setInput(e.target.value)}
+                        onChange={e => { setInput(e.target.value); mention.handleInputChange(e); }}
+                        onKeyDown={handleKeyDown}
                      />
                      <button type="submit" className="bg-blue-600 text-white rounded-full p-2.5 flex items-center justify-center">
                         <Icons.Send />
@@ -202,12 +378,35 @@
           );
       };
 
-      const MobileUplink = ({ actions, onSendEmail }) => {
-          const [subTab, setSubTab] = useState("compose"); 
+      function normalizeRecipient(raw) {
+        return (raw || "").replace(/^inbox:/i, "").trim();
+      }
+      function isHumanAgent(name) {
+        return (name || "").toLowerCase().startsWith("human-");
+      }
+      function isAbeAgent(name) {
+        return (name || "").toLowerCase().startsWith("abe-");
+      }
+
+      const MobileUplink = ({ actions, onSendEmail, heartbeats }) => {
+          const [subTab, setSubTab] = useState("compose");
+          const [selectedInbox, setSelectedInbox] = useState("all");
           const [to, setTo] = useState("");
           const [msg, setMsg] = useState("");
 
+          const agents = useMemo(() => {
+              const names = new Set();
+              (heartbeats || []).forEach(hb => {
+                  if (hb.data?.abe) names.add(hb.data.abe);
+              });
+              return [...names].sort();
+          }, [heartbeats]);
+
+          const msgRef = useRef(null);
+          const mention = useAtMention(agents, msgRef, setMsg);
+
           const emails = useMemo(() => {
+             const seenIds = new Set();
              const candidates = actions
                 .filter(a => {
                     try {
@@ -217,11 +416,47 @@
                 })
                 .map(a => {
                     const e = JSON.parse(a.data.entry);
-                    return { ...e, timestamp: e.timestamp_intent };
+                    return { ...e, streamId: a.id, timestamp: e.timestamp_intent };
                 })
                 .sort((a,b) => (b.timestamp||"").localeCompare(a.timestamp||""));
-             return candidates;
+             return candidates.filter(e => {
+                 const key = e.id || `${e.timestamp_intent}-${e.action?.message}-${e.streamId}`;
+                 if (seenIds.has(key)) return false;
+                 seenIds.add(key);
+                 return true;
+             });
           }, [actions]);
+
+          const entities = useMemo(() => {
+              const set = new Set();
+              emails.forEach(e => {
+                  const sender = normalizeRecipient(e.agent);
+                  const recip = normalizeRecipient(e.action?.recipient);
+                  if (!isAbeAgent(sender) && !isHumanAgent(sender)) set.add(sender);
+                  if (!isAbeAgent(recip) && !isHumanAgent(recip)) set.add(recip);
+              });
+              return [...set].sort();
+          }, [emails]);
+
+          const filteredEmails = useMemo(() => {
+              if (selectedInbox === "all") return emails;
+              if (selectedInbox === "abe") {
+                  return emails.filter(e =>
+                      isAbeAgent(normalizeRecipient(e.agent)) && isAbeAgent(normalizeRecipient(e.action?.recipient))
+                  );
+              }
+              if (selectedInbox === "human") {
+                  return emails.filter(e =>
+                      isHumanAgent(normalizeRecipient(e.agent)) || isHumanAgent(normalizeRecipient(e.action?.recipient))
+                  );
+              }
+              return emails.filter(e => {
+                  const sender = normalizeRecipient(e.agent).toLowerCase();
+                  const recip = normalizeRecipient(e.action?.recipient).toLowerCase();
+                  const target = selectedInbox.toLowerCase();
+                  return sender === target || recip === target;
+              });
+          }, [emails, selectedInbox]);
 
           const handleSend = (e) => {
               e.preventDefault();
@@ -233,17 +468,34 @@
 
           return (
               <div className="flex flex-col h-full bg-gray-900">
+                 <div className="p-2 bg-gray-800 border-b border-gray-700">
+                     <select
+                         value={selectedInbox}
+                         onChange={(e) => setSelectedInbox(e.target.value)}
+                         className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white text-sm"
+                     >
+                         <option value="all">All</option>
+                         <option value="abe">Internal (Abe Fleet)</option>
+                         <option value="human">Human Operators</option>
+                         {entities.map(name => (
+                             <option key={name} value={name}>{name}</option>
+                         ))}
+                     </select>
+                 </div>
                  <div className="flex-1 overflow-y-auto p-4 space-y-3">
                     {subTab === 'inbox' ? (
                         <div className="space-y-3">
-                           {emails.length === 0 && <div className="text-center text-gray-600 mt-10 text-sm">No recent emails found.</div>}
-                           {emails.map((e, i) => (
+                           {filteredEmails.length === 0 && <div className="text-center text-gray-600 mt-10 text-sm">No recent emails found.</div>}
+                           {filteredEmails.map((e, i) => (
                                <div key={i} className="bg-gray-800 border border-gray-700 p-3 rounded-lg">
                                   <div className="flex justify-between text-xs text-gray-500 mb-2">
                                      <span className="text-blue-300 font-bold">{e.agent} → {e.action.recipient}</span>
                                      <span>{formatTime(e.timestamp)}</span>
                                   </div>
-                                  <div className="text-sm text-gray-200 whitespace-pre-wrap">{e.action.message}</div>
+                                  <div
+                                     className="text-sm text-gray-200 font-sans prose prose-invert prose-sm max-w-none"
+                                     dangerouslySetInnerHTML={% raw %}{{ __html: DOMPurify.sanitize(marked.parse(e.action.message || "")) }}{% endraw %}
+                                  />
                                </div>
                            ))}
                         </div>
@@ -252,12 +504,18 @@
                            <div className="bg-gray-800 border border-gray-700 p-4 rounded-lg space-y-4">
                                <h3 className="font-bold text-gray-400 uppercase tracking-widest text-xs">Secure Uplink</h3>
                                <div>
-                                   <label className="block text-xs text-gray-500 mb-1">To (comma separated)</label>
-                                   <input value={to} onChange={e=>setTo(e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white" placeholder="abe-01, abe-02" />
+                                   <label className="block text-xs text-gray-500 mb-1">To</label>
+                                   <select value={to} onChange={e=>setTo(e.target.value)} className="w-full bg-gray-900 border border-gray-600 rounded p-2 text-white">
+                                       <option value="">Select recipient...</option>
+                                       {agents.map(name => (
+                                           <option key={name} value={name}>{name}</option>
+                                       ))}
+                                   </select>
                                </div>
-                               <div>
+                               <div className="relative">
                                    <label className="block text-xs text-gray-500 mb-1">Message</label>
-                                   <textarea value={msg} onChange={e=>setMsg(e.target.value)} className="w-full h-32 bg-gray-900 border border-gray-600 rounded p-2 text-white" placeholder="Direct command..." />
+                                   <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} anchorRef={msgRef} />
+                                   <textarea ref={msgRef} value={msg} onChange={e=>{ setMsg(e.target.value); mention.handleInputChange(e); }} onKeyDown={mention.handleKeyDown} className="w-full h-32 bg-gray-900 border border-gray-600 rounded p-2 text-white" placeholder="Direct command..." />
                                </div>
                                <button onClick={handleSend} className="w-full bg-blue-600 text-white font-bold py-3 rounded hover:bg-blue-500">SEND UPLINK</button>
                            </div>
@@ -274,113 +532,346 @@
           );
       };
 
-      const MobileActivity = ({ actions, digests }) => {
+      const MobileTokenUsage = ({ entries }) => {
+          const containerRef = useAutoScroll([entries]);
+
+          const utilizationColor = (pct) => {
+              const p = parseFloat(pct);
+              if (p >= 80) return "bg-red-500";
+              if (p >= 50) return "bg-yellow-500";
+              return "bg-green-500";
+          };
+
+          return (
+              <div ref={containerRef} className="p-2 overflow-y-auto h-full space-y-2 no-scrollbar font-mono">
+                  <h2 className="text-gray-500 text-xs font-bold uppercase tracking-wider mb-3">Token Usage</h2>
+                  {entries.length === 0 && <div className="text-gray-600 text-center py-10 text-sm">No token data yet.</div>}
+                  {entries.map((e, i) => {
+                      const d = e.data || {};
+                      const pct = parseFloat(d.utilization_pct || 0);
+                      const total = parseInt(d.total_tokens || 0);
+                      const limit = parseInt(d.context_limit || 32768);
+                      return (
+                          <div key={i} className="bg-gray-800/40 border border-gray-700 rounded p-2 text-[11px]">
+                              <div className="flex justify-between items-center mb-1">
+                                  <span className="text-cyan-400 font-bold">{d.source}/{d.agent}</span>
+                                  <span className="text-gray-500">{formatTime(d.ts)}</span>
+                              </div>
+                              <div className="text-gray-400 truncate mb-1">{d.model}</div>
+                              <div className="flex items-center gap-2 mb-1">
+                                  <div className="flex-1 bg-gray-700 rounded-full h-1.5">
+                                      <div
+                                          className={`h-1.5 rounded-full ${utilizationColor(pct)}`}
+                                          style={% raw %}{{ width: `${Math.min(pct, 100)}%` }}{% endraw %}
+                                      />
+                                  </div>
+                                  <span className="text-gray-300 whitespace-nowrap text-[10px]">
+                                      {total.toLocaleString()} / {limit.toLocaleString()} ({pct.toFixed(1)}%)
+                                  </span>
+                              </div>
+                              <div className="text-gray-500 text-[10px]">
+                                  ↑{parseInt(d.prompt_tokens||0).toLocaleString()} ↓{parseInt(d.completion_tokens||0).toLocaleString()}
+                                  {parseInt(d.cached_tokens||0) > 0 && (
+                                      <span className="text-teal-500 ml-1">⚡{parseInt(d.cached_tokens).toLocaleString()} cached</span>
+                                  )}
+                              </div>
+                          </div>
+                      );
+                  })}
+              </div>
+          );
+      };
+
+      const isErrorEntry = (entry) => {
+          const errorStatuses = ['error', 'self_correcting', 'interrupted', 'failed'];
+          if (errorStatuses.includes(entry.status)) return true;
+          const r = entry.results || {};
+          if (r.error || r.status === 'error' || r.status === 'failed') return true;
+          if (typeof entry.reasoning === 'string' && entry.reasoning.startsWith('Error:')) return true;
+          return false;
+      };
+
+      const getErrorMessage = (entry) => {
+          const r = entry.results || {};
+          return r.error || r.message || (entry.reasoning?.startsWith('Error:') ? entry.reasoning : null) || 'Unknown error';
+      };
+
+      const MobileActivity = ({ actions, digests, tokenUsage }) => {
           const [subTab, setSubTab] = useState("logs");
+          const containerRef = useAutoScroll([actions, digests]);
+
+          const dedupedActions = useMemo(() => {
+              const seen = new Map();
+              for (let i = actions.length - 1; i >= 0; i--) {
+                  try {
+                      const entry = JSON.parse(actions[i].data.entry || "{}");
+                      const key = entry.id || actions[i].id;
+                      if (!seen.has(key)) seen.set(key, actions[i]);
+                  } catch { continue; }
+              }
+              return [...seen.values()].reverse();
+          }, [actions]);
 
           return (
               <div className="flex flex-col h-full bg-gray-900">
-                  <div className="flex-1 overflow-y-auto p-2 no-scrollbar">
-                      {subTab === 'logs' ? (
-                          <div className="space-y-2">
-                              {actions.map((e, i) => {
-                                  try {
-                                    const entry = JSON.parse(e.data.entry || "{}");
-                                    const statusColor = entry.status === "completed" ? "text-green-400" : "text-yellow-400";
-                                    return (
-                                        <div key={i} className="bg-gray-800/30 border-l-2 border-gray-600 p-2 text-xs rounded-r">
-                                            <div className="flex justify-between mb-1">
-                                                <span className="font-bold text-blue-300">{entry.agent}</span>
-                                                <span className="text-gray-500">{formatTime(entry.timestamp_intent)}</span>
+                  {subTab === 'tokens' ? (
+                      <MobileTokenUsage entries={tokenUsage} />
+                  ) : (
+                      <div ref={containerRef} className="flex-1 overflow-y-auto p-2 no-scrollbar">
+                          {subTab === 'logs' ? (
+                              <div className="space-y-2">
+                                  {dedupedActions.map((e, i) => {
+                                      try {
+                                        const entry = JSON.parse(e.data.entry || "{}");
+                                        const statusColor = entry.status === "completed" ? "text-green-400" : ["error", "failed", "self_correcting", "interrupted"].includes(entry.status) ? "text-red-400" : "text-yellow-400";
+                                        return (
+                                            <div key={i} className="bg-gray-800/30 border-l-2 border-gray-600 p-2 text-xs rounded-r">
+                                                <div className="flex justify-between mb-1">
+                                                    <span className="font-bold text-blue-300">{entry.agent}</span>
+                                                    <span className="text-gray-500">{formatTime(entry.timestamp_intent)}</span>
+                                                </div>
+                                                <div className={`${statusColor} font-bold`}>{entry.action?.tool || "Unknown"}</div>
+                                                {entry.reasoning && <div className="text-gray-400 italic mt-1 pl-1 border-l border-gray-700">"{entry.reasoning}"</div>}
                                             </div>
-                                            <div className={`${statusColor} font-bold`}>{entry.action?.tool || "Unknown"}</div>
-                                            {entry.reasoning && <div className="text-gray-400 italic mt-1 pl-1 border-l border-gray-700">"{entry.reasoning}"</div>}
-                                        </div>
-                                    )
-                                  } catch { return null; }
-                              })}
-                          </div>
-                      ) : (
-                          <div className="space-y-2">
-                              {digests.map((d, i) => {
-                                  try {
-                                      const data = d.data || {};
-                                      return (
-                                          <div key={i} className="bg-gray-800 border border-gray-700 rounded p-3 text-xs">
-                                              <div className="text-gray-500 mb-1 flex justify-between">
-                                                  <span>Ambient Burst</span>
-                                                  <span>{formatTime(data.generated_at)}</span>
+                                        )
+                                      } catch { return null; }
+                                  })}
+                              </div>
+                          ) : (
+                              <div className="space-y-2">
+                                  {digests.map((d, i) => {
+                                      try {
+                                          const data = d.data || {};
+                                          return (
+                                              <div key={i} className="bg-gray-800 border border-gray-700 rounded p-3 text-xs">
+                                                  <div className="text-gray-500 mb-1 flex justify-between">
+                                                      <span>Ambient Burst</span>
+                                                      <span>{formatTime(data.generated_at)}</span>
+                                                  </div>
+                                                  <div className="text-gray-200 italic leading-relaxed">"{data.summary}"</div>
                                               </div>
-                                              <div className="text-gray-200 italic leading-relaxed">"{data.summary}"</div>
-                                          </div>
-                                      )
-                                  } catch { return null; }
-                              })}
-                          </div>
-                      )}
-                  </div>
-                  
+                                          )
+                                      } catch { return null; }
+                                  })}
+                              </div>
+                          )}
+                      </div>
+                  )}
+
                   {/* Bottom Sub-Tabs */}
-                  <div className="grid grid-cols-2 bg-gray-800 border-t border-gray-700">
+                  <div className="grid grid-cols-3 bg-gray-800 border-t border-gray-700">
                      <button onClick={()=>setSubTab("logs")} className={`py-3 text-xs font-bold uppercase ${subTab==='logs' ? 'text-blue-400 border-t-2 border-blue-400 bg-gray-800' : 'text-gray-500 bg-gray-900'}`}>Action Logs</button>
                      <button onClick={()=>setSubTab("digests")} className={`py-3 text-xs font-bold uppercase ${subTab==='digests' ? 'text-blue-400 border-t-2 border-blue-400 bg-gray-800' : 'text-gray-500 bg-gray-900'}`}>Digests</button>
+                     <button onClick={()=>setSubTab("tokens")} className={`py-3 text-xs font-bold uppercase ${subTab==='tokens' ? 'text-blue-400 border-t-2 border-blue-400 bg-gray-800' : 'text-gray-500 bg-gray-900'}`}>Tokens</button>
                  </div>
+              </div>
+          );
+      };
+
+      const MobileErrorView = ({ actions }) => {
+          const [filterType, setFilterType] = useState("all");
+          const [filterAgent, setFilterAgent] = useState("all");
+          const [filterText, setFilterText] = useState("");
+
+          const allErrors = useMemo(() => {
+              const seen = new Map();
+              for (let i = actions.length - 1; i >= 0; i--) {
+                  try {
+                      const entry = JSON.parse(actions[i].data.entry || "{}");
+                      const key = entry.id || actions[i].id;
+                      if (!seen.has(key)) seen.set(key, { streamEvent: actions[i], entry });
+                  } catch { continue; }
+              }
+              return [...seen.values()].filter(({ entry }) => isErrorEntry(entry)).reverse();
+          }, [actions]);
+
+          const uniqueAgents = useMemo(() => {
+              const agents = new Set();
+              allErrors.forEach(({ entry }) => { if (entry.agent) agents.add(entry.agent); });
+              return [...agents].sort();
+          }, [allErrors]);
+
+          const uniqueStatuses = useMemo(() => {
+              const statuses = new Set();
+              allErrors.forEach(({ entry }) => { if (entry.status) statuses.add(entry.status); });
+              return [...statuses].sort();
+          }, [allErrors]);
+
+          const filteredErrors = useMemo(() => {
+              return allErrors.filter(({ entry }) => {
+                  if (filterType !== "all" && entry.status !== filterType) return false;
+                  if (filterAgent !== "all" && entry.agent !== filterAgent) return false;
+                  if (filterText) {
+                      const needle = filterText.toLowerCase();
+                      const msg = getErrorMessage(entry).toLowerCase();
+                      const tool = (entry.action?.tool || "").toLowerCase();
+                      const reasoning = (entry.reasoning || "").toLowerCase();
+                      const agent = (entry.agent || "").toLowerCase();
+                      if (!msg.includes(needle) && !tool.includes(needle) && !reasoning.includes(needle) && !agent.includes(needle)) return false;
+                  }
+                  return true;
+              });
+          }, [allErrors, filterType, filterAgent, filterText]);
+
+          const selectStyle = "bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-500 flex-1 min-w-0";
+
+          return (
+              <div className="flex flex-col h-full bg-gray-900">
+                  {/* Filters */}
+                  <div className="p-2 border-b border-gray-800 bg-gray-800/50 space-y-2 shrink-0">
+                      <div className="flex items-center justify-between">
+                          <span className="text-xs font-bold text-red-400">
+                              {filteredErrors.length === allErrors.length ? allErrors.length : `${filteredErrors.length} / ${allErrors.length}`} errors
+                          </span>
+                          {(filterType !== "all" || filterAgent !== "all" || filterText) && (
+                              <button
+                                  onClick={() => { setFilterType("all"); setFilterAgent("all"); setFilterText(""); }}
+                                  className="text-[10px] text-gray-500 px-2 py-0.5 border border-gray-700 rounded"
+                              >
+                                  Clear
+                              </button>
+                          )}
+                      </div>
+                      <div className="flex gap-2">
+                          <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className={selectStyle}>
+                              <option value="all">All Types</option>
+                              {uniqueStatuses.map(s => (
+                                  <option key={s} value={s}>{s === 'self_correcting' ? 'Self-Correcting' : s.charAt(0).toUpperCase() + s.slice(1)}</option>
+                              ))}
+                          </select>
+                          <select value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)} className={selectStyle}>
+                              <option value="all">All Agents</option>
+                              {uniqueAgents.map(a => <option key={a} value={a}>{a}</option>)}
+                          </select>
+                      </div>
+                      <input
+                          value={filterText}
+                          onChange={(e) => setFilterText(e.target.value)}
+                          placeholder="Search errors..."
+                          className="w-full bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-500"
+                      />
+                  </div>
+
+                  {/* Error List */}
+                  <div className="flex-1 overflow-y-auto p-2 no-scrollbar space-y-2">
+                      {filteredErrors.length === 0 && (
+                          <div className="text-xs text-gray-600 text-center italic mt-10">
+                              {allErrors.length === 0 ? "No errors detected." : "No errors match the current filters."}
+                          </div>
+                      )}
+                      {filteredErrors.map(({ streamEvent, entry }, i) => {
+                          const statusLabel = entry.status === 'self_correcting' ? 'self-correcting' : entry.status;
+                          const statusColor = entry.status === 'interrupted' ? 'text-yellow-400' : entry.status === 'self_correcting' ? 'text-orange-400' : 'text-red-400';
+                          return (
+                              <div key={i} className="bg-red-950/20 border-l-2 border-red-800 p-2 text-xs rounded-r">
+                                  <div className="flex justify-between mb-1">
+                                      <span className="font-bold text-blue-300">{entry.agent}</span>
+                                      <span className="text-gray-500">{formatTime(entry.timestamp_intent)}</span>
+                                  </div>
+                                  <div className="flex items-center gap-1.5 mb-1">
+                                      <span className="text-red-400 font-bold">{entry.action?.tool || "Unknown"}</span>
+                                      <span className={`text-[10px] font-bold uppercase ${statusColor}`}>[{statusLabel}]</span>
+                                  </div>
+                                  <div className="text-red-300/80 bg-red-950/30 px-1.5 py-1 rounded text-[10px] break-all">{getErrorMessage(entry)}</div>
+                                  {entry.reasoning && !entry.reasoning.startsWith('Error:') && (
+                                      <div className="text-gray-400 italic mt-1 pl-1 border-l border-gray-700">"{entry.reasoning}"</div>
+                                  )}
+                              </div>
+                          );
+                      })}
+                  </div>
               </div>
           );
       };
 
       const App = () => {
         const [activeTab, setActiveTab] = useState("chat");
-        const [identity, setIdentity] = useState("Human-Abe");
+        const [identity, setIdentity] = useState(HUMAN_NAME);
         const [socket, setSocket] = useState(null);
         
         const [chats, setChats] = useState({});
         const [activeChannel, setActiveChannel] = useState("chat:general");
-        const [channels, setChannels] = useState(["chat:general"]);
+        const [channels, setChannels] = useState(["chat:general", "chat:synchronous"]);
         const [actions, setActions] = useState([]);
         const [digests, setDigests] = useState([]);
         const [heartbeats, setHeartbeats] = useState([]);
+        const [tokenUsage, setTokenUsage] = useState([]);
         const [connected, setConnected] = useState(false);
 
         useEffect(() => {
-          const ws = new WebSocket(`ws://${window.location.host}/ws`);
-          ws.onopen = () => setConnected(true);
-          ws.onclose = () => setConnected(false);
+          let ws = null;
+          let backoff = 1000;
+          let destroyed = false;
 
-          ws.onmessage = (event) => {
-             try {
-                 const msg = JSON.parse(event.data);
-                 if (msg.type === "channel_discovery") {
-                     setChannels(prev => prev.includes(msg.channel) ? prev : [...prev, msg.channel].sort());
-                 }
-                 else if (msg.type === "stream_event") {
-                     if (msg.stream.startsWith("chat:")) {
-                         setChats(prev => ({
-                             ...prev,
-                             [msg.stream]: [...(prev[msg.stream] || []), msg].sort((a,b) => (a.data.timestamp||"").localeCompare(b.data.timestamp||""))
-                         }));
-                     }
-                     else if (msg.stream === "volition:action_log") {
-                         setActions(prev => {
-                             if (prev.some(p => p.id === msg.id)) return prev;
-                             return [...prev, msg].sort((a,b) => {
-                                 const ta = JSON.parse(a.data.entry||"{}").timestamp_intent || "";
-                                 const tb = JSON.parse(b.data.entry||"{}").timestamp_intent || "";
-                                 return tb.localeCompare(ta); 
-                             }).slice(0, 50); 
-                         });
-                     }
-                     else if (msg.stream === "volition:social_digests") {
-                         setDigests(prev => [...prev.filter(p=>p.id!==msg.id), msg].sort((a,b) => (b.data.generated_at||"").localeCompare(a.data.generated_at||"")).slice(0,20));
-                     }
-                     else if (msg.stream === "volition:heartbeat") {
-                         setHeartbeats(prev => [...prev.slice(-50), msg]);
-                     }
-                 }
-             } catch(e) { console.error(e); }
+          const connect = () => {
+            if (destroyed) return;
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
+
+            ws.onopen = () => {
+              setConnected(true);
+              backoff = 1000;
+              // Clear stale state so fresh history from server replaces it
+              setChats({});
+              setActions([]);
+              setDigests([]);
+              setTokenUsage([]);
+              setHeartbeats([]);
+              setSocket(ws);
+            };
+
+            ws.onclose = () => {
+              setConnected(false);
+              setSocket(null);
+              if (!destroyed) {
+                setTimeout(connect, backoff);
+                backoff = Math.min(backoff * 2, 30000);
+              }
+            };
+
+            ws.onerror = () => ws.close();
+
+            ws.onmessage = (event) => {
+               try {
+                   const msg = JSON.parse(event.data);
+                   if (msg.type === "channel_discovery") {
+                       setChannels(prev => prev.includes(msg.channel) ? prev : [...prev, msg.channel].sort());
+                   }
+                   else if (msg.type === "stream_event") {
+                       if (msg.stream.startsWith("chat:")) {
+                           setChats(prev => ({
+                               ...prev,
+                               [msg.stream]: [...(prev[msg.stream] || []), msg].sort((a,b) => (a.data.timestamp||"").localeCompare(b.data.timestamp||""))
+                           }));
+                       }
+                       else if (msg.stream === "volition:action_log") {
+                           setActions(prev => {
+                               if (prev.some(p => p.id === msg.id)) return prev;
+                               return [...prev, msg].sort((a,b) => {
+                                   const ta = JSON.parse(a.data.entry||"{}").timestamp_intent || "";
+                                   const tb = JSON.parse(b.data.entry||"{}").timestamp_intent || "";
+                                   return ta.localeCompare(tb);
+                               }).slice(-300);
+                           });
+                       }
+                       else if (msg.stream === "volition:social_digests") {
+                           setDigests(prev => [...prev.filter(p=>p.id!==msg.id), msg].sort((a,b) => (a.data.generated_at||"").localeCompare(b.data.generated_at||"")).slice(-20));
+                       }
+                       else if (msg.stream === "volition:token_usage") {
+                           setTokenUsage(prev => [...prev.slice(-200), msg]);
+                       }
+                       else if (msg.stream === "volition:heartbeat") {
+                           setHeartbeats(prev => [...prev.slice(-50), msg]);
+                       }
+                   }
+               } catch(e) { console.error(e); }
+            };
           };
 
-          setSocket(ws);
-          return () => ws.close();
+          connect();
+          return () => {
+            destroyed = true;
+            if (ws) ws.close();
+          };
         }, []);
 
         const handleSendChat = (channel, content) => {
@@ -441,16 +932,18 @@
             <div className="flex-1 overflow-hidden relative bg-black">
                 <SafeRender>
                     {activeTab === 'chat' && (
-                        <MobileChat 
-                            channel={activeChannel} 
+                        <MobileChat
+                            channel={activeChannel}
                             messages={chats[activeChannel] || []}
                             onSend={handleSendChat}
                             identity={identity}
+                            heartbeats={heartbeats}
                         />
                     )}
-                    {activeTab === 'uplink' && <MobileUplink actions={actions} onSendEmail={handleSendEmail} />}
+                    {activeTab === 'uplink' && <MobileUplink actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />}
                     {activeTab === 'fleet' && <MobileFleet heartbeats={heartbeats} />}
-                    {activeTab === 'activity' && <MobileActivity actions={actions} digests={digests} />}
+                    {activeTab === 'activity' && <MobileActivity actions={actions} digests={digests} tokenUsage={tokenUsage} />}
+                    {activeTab === 'errors' && <MobileErrorView actions={actions} />}
                 </SafeRender>
             </div>
 
@@ -471,6 +964,10 @@
                 <button onClick={() => setActiveTab('activity')} className={`flex flex-col items-center gap-1 p-2 w-full ${activeTab==='activity' ? 'text-blue-400' : 'text-gray-500'}`}>
                     <Icons.Activity />
                     <span className="text-[10px] font-bold">Activity</span>
+                </button>
+                <button onClick={() => setActiveTab('errors')} className={`flex flex-col items-center gap-1 p-2 w-full ${activeTab==='errors' ? 'text-red-400' : 'text-gray-500'}`}>
+                    <Icons.Errors />
+                    <span className="text-[10px] font-bold">Errors</span>
                 </button>
             </div>
 

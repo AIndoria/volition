@@ -54,7 +54,7 @@ async def logger_daemon():
 
     # Task 1: Stream Reader (Actions, Chat)
     async def stream_reader():
-        last_ids = {"volition:action_log": "$", "chat:general": "$", "chat:synchronous": "$"}
+        last_ids = {"volition:action_log": "$", "chat:general": "$", "chat:synchronous": "$", "volition:token_usage": "$"}
         while True:
             try:
                 streams = await r.xread(last_ids, block=5000)

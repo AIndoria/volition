@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Volition Command</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.tailwindcss.com?plugins=typography"></script>
     <script>
       tailwind.config = {
         darkMode: "class",
@@ -29,6 +29,8 @@
       crossorigin
       src="https://unpkg.com/@babel/standalone/babel.min.js"
     ></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify/dist/purify.min.js"></script>
     <style>
       body {
         background-color: #0d1117;
@@ -48,29 +50,346 @@
         background-color: #30363d;
         border-radius: 3px;
       }
+      .prose.prose-invert a { color: #58a6ff; }
+      .prose.prose-invert code { background: #21262d; padding: 0.1em 0.3em; border-radius: 3px; font-size: 0.85em; }
+      .prose.prose-invert pre { background: #21262d; border: 1px solid #30363d; }
+      .prose.prose-invert pre code { background: transparent; padding: 0; }
+      .prose.prose-invert h1,
+      .prose.prose-invert h2,
+      .prose.prose-invert h3 { color: #e6edf3; }
+
+      /* Panel resize handles */
+      .resize-handle {
+        flex-shrink: 0;
+        width: 6px;
+        cursor: col-resize;
+        position: relative;
+        z-index: 10;
+        transition: background-color 0.15s ease;
+      }
+      .resize-handle::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        left: -4px;
+        right: -4px;
+      }
+      .resize-handle:hover { background-color: rgba(56, 139, 253, 0.35); }
+      .resize-handle:active { background-color: rgba(56, 139, 253, 0.6); }
+      .resize-handle-inner {
+        position: absolute;
+        inset: 0;
+        left: 2px;
+        right: 2px;
+        background: #30363d;
+        border-radius: 3px;
+        transition: background-color 0.15s ease;
+      }
+      .resize-handle:hover .resize-handle-inner { background: rgba(56, 139, 253, 0.7); }
+
+      /* Panel transitions */
+      .panel-transition {
+        transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1),
+                    min-width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+        overflow-x: hidden;
+      }
+      .panel-no-transition {
+        transition: none !important;
+      }
+
+      /* Collapsed icon buttons */
+      .collapsed-icon-btn {
+        width: 34px;
+        height: 30px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 7px;
+        cursor: pointer;
+        transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
+        font-size: 11px;
+        font-weight: bold;
+        letter-spacing: 0.05em;
+        color: #6e7681;
+        border: 1px solid transparent;
+      }
+      .collapsed-icon-btn:hover {
+        background-color: rgba(56, 139, 253, 0.12);
+        border-color: rgba(56, 139, 253, 0.3);
+        color: #58a6ff;
+      }
+      .collapsed-icon-btn.active-channel {
+        background-color: rgba(56, 139, 253, 0.18);
+        border-color: rgba(56, 139, 253, 0.45);
+        color: #79c0ff;
+        box-shadow: 0 0 8px rgba(56, 139, 253, 0.15);
+      }
+      .collapsed-icon-btn.active-email {
+        background-color: rgba(56, 139, 253, 0.18);
+        border-color: rgba(56, 139, 253, 0.45);
+        color: #79c0ff;
+        box-shadow: 0 0 8px rgba(56, 139, 253, 0.15);
+      }
+
+      /* Collapsed sidebar expand trigger (logo area) */
+      .collapsed-logo-btn {
+        width: 100%;
+        padding: 10px 0;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        border-bottom: 1px solid #21262d;
+        transition: background-color 0.2s, color 0.2s;
+        font-size: 13px;
+        font-weight: 800;
+        letter-spacing: 0.12em;
+        color: #388bfd;
+        background: rgba(56, 139, 253, 0.05);
+        border-radius: 8px 8px 0 0;
+        flex-shrink: 0;
+      }
+      .collapsed-logo-btn:hover {
+        background-color: rgba(56, 139, 253, 0.15);
+        color: #79c0ff;
+      }
+
+      /* Prominent expand button at bottom of collapsed sidebar */
+      .sidebar-expand-btn {
+        width: 34px;
+        height: 34px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 8px;
+        cursor: pointer;
+        transition: background-color 0.15s, color 0.15s, box-shadow 0.15s, transform 0.15s;
+        font-size: 16px;
+        color: #388bfd;
+        background: rgba(56, 139, 253, 0.1);
+        border: 1px solid rgba(56, 139, 253, 0.35);
+        flex-shrink: 0;
+      }
+      .sidebar-expand-btn:hover {
+        background-color: rgba(56, 139, 253, 0.22);
+        border-color: rgba(56, 139, 253, 0.6);
+        color: #79c0ff;
+        box-shadow: 0 0 10px rgba(56, 139, 253, 0.25);
+      }
+
+      /* Collapse button in expanded header */
+      .sidebar-collapse-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 16px;
+        color: #388bfd;
+        background: rgba(56, 139, 253, 0.1);
+        border: 1px solid rgba(56, 139, 253, 0.35);
+        transition: background-color 0.15s, color 0.15s, box-shadow 0.15s, transform 0.15s;
+        flex-shrink: 0;
+      }
+      .sidebar-collapse-btn:hover {
+        background-color: rgba(56, 139, 253, 0.22);
+        border-color: rgba(56, 139, 253, 0.6);
+        color: #79c0ff;
+        box-shadow: 0 0 10px rgba(56, 139, 253, 0.25);
+      }
+
+      /* Prevent content from stealing mouse during drag */
+      .is-resizing * { pointer-events: none !important; }
+      .is-resizing { cursor: col-resize !important; user-select: none !important; }
     </style>
   </head>
   <body class="h-screen w-screen overflow-hidden flex flex-col">
     <div id="root" class="h-full w-full"></div>
 
     <script type="text/babel">
+      const HUMAN_NAME = "{{ human_name }}";
       const { useState, useEffect, useRef, useMemo } = React;
       const formatTime = (iso) => {
         if (!iso) return "??:??:??";
         try {
-          return iso.split("T")[1].split(".")[0];
+          return new Date(iso + "Z").toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false});
         } catch {
           return new Date().toLocaleTimeString();
         }
       };
 
+      // --- @MENTION AUTOCOMPLETE ---
+
+      const useAtMention = (agents, inputRef, setValue) => {
+        const [showPopup, setShowPopup] = React.useState(false);
+        const [query, setQuery] = React.useState("");
+        const [selectedIndex, setSelectedIndex] = React.useState(0);
+        const [mentionStart, setMentionStart] = React.useState(-1);
+
+        const filteredAgents = React.useMemo(() => {
+          if (!showPopup) return [];
+          return agents.filter(a => a.toLowerCase().startsWith(query.toLowerCase()));
+        }, [agents, query, showPopup]);
+
+        const dismissPopup = React.useCallback(() => {
+          setShowPopup(false);
+          setQuery("");
+          setSelectedIndex(0);
+          setMentionStart(-1);
+        }, []);
+
+        const handleSelect = React.useCallback((agentName) => {
+          const el = inputRef.current;
+          if (!el) return;
+          const val = el.value;
+          const cursor = el.selectionStart;
+          const newVal = val.slice(0, mentionStart) + "@" + agentName + " " + val.slice(cursor);
+          setValue(newVal);
+          dismissPopup();
+          requestAnimationFrame(() => {
+            const pos = mentionStart + agentName.length + 2;
+            el.setSelectionRange(pos, pos);
+            el.focus();
+          });
+        }, [inputRef, mentionStart, setValue, dismissPopup]);
+
+        const handleInputChange = React.useCallback((e) => {
+          const val = e.target.value;
+          const cursor = e.target.selectionStart;
+          let atPos = -1;
+          for (let i = cursor - 1; i >= 0; i--) {
+            if (val[i] === " " || val[i] === "\n") break;
+            if (val[i] === "@") { atPos = i; break; }
+          }
+          if (atPos !== -1) {
+            const q = val.slice(atPos + 1, cursor);
+            setMentionStart(atPos);
+            setQuery(q);
+            setShowPopup(true);
+            setSelectedIndex(0);
+          } else {
+            dismissPopup();
+          }
+        }, [dismissPopup]);
+
+        const handleKeyDown = React.useCallback((e) => {
+          if (!showPopup || filteredAgents.length === 0) return;
+          if (e.key === "ArrowDown") {
+            e.preventDefault();
+            setSelectedIndex(i => (i + 1) % filteredAgents.length);
+          } else if (e.key === "ArrowUp") {
+            e.preventDefault();
+            setSelectedIndex(i => (i - 1 + filteredAgents.length) % filteredAgents.length);
+          } else if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            handleSelect(filteredAgents[selectedIndex]);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            dismissPopup();
+          }
+        }, [showPopup, filteredAgents, selectedIndex, handleSelect, dismissPopup]);
+
+        return { popupVisible: showPopup && filteredAgents.length > 0, filteredAgents, selectedIndex, handleInputChange, handleKeyDown, handleSelect, dismissPopup };
+      };
+
+      const autoResize = (el) => {
+        el.style.height = "0";
+        el.style.height = el.scrollHeight + "px";
+      };
+
+      const useAutoScroll = (deps) => {
+        const containerRef = useRef(null);
+        const isNearBottom = useRef(true);
+        useEffect(() => {
+          const el = containerRef.current;
+          if (!el) return;
+          const onScroll = () => {
+            isNearBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+          };
+          el.addEventListener("scroll", onScroll);
+          return () => el.removeEventListener("scroll", onScroll);
+        }, []);
+        useEffect(() => {
+          if (isNearBottom.current && containerRef.current) {
+            containerRef.current.scrollTo({ top: containerRef.current.scrollHeight, behavior: "smooth" });
+          }
+        }, deps);
+        return containerRef;
+      };
+
+      const ResizeHandle = ({ onMouseDown, onDoubleClick, hidden }) => {
+        if (hidden) return null;
+        return (
+          <div
+            className="resize-handle"
+            onMouseDown={onMouseDown}
+            onDoubleClick={onDoubleClick}
+            title="Drag to resize · Double-click to reset"
+          >
+            <div className="resize-handle-inner" />
+          </div>
+        );
+      };
+
+      const MentionPopup = ({ visible, agents, selectedIndex, onSelect, anchorRef }) => {
+        const [coords, setCoords] = React.useState({ top: 0, left: 0, width: 224 });
+        React.useLayoutEffect(() => {
+          if (!visible || !anchorRef?.current) return;
+          const r = anchorRef.current.getBoundingClientRect();
+          setCoords({ top: r.top + window.scrollY, left: r.left + window.scrollX, width: r.width });
+        }, [visible, anchorRef]);
+        if (!visible) return null;
+        const popupStyle = { position: "absolute", top: coords.top - 4, left: coords.left, width: coords.width, transform: "translateY(-100%)", zIndex: 9999 };
+        return ReactDOM.createPortal(
+          <div
+            style={popupStyle}
+            className="max-h-48 overflow-y-auto bg-gray-800 border border-gray-600 rounded shadow-lg"
+          >
+            {agents.map((name, i) => (
+              <div
+                key={name}
+                onMouseDown={(e) => { e.preventDefault(); onSelect(name); }}
+                className={`px-3 py-1.5 text-sm cursor-pointer ${i === selectedIndex ? "bg-blue-600 text-white" : "text-gray-300 hover:bg-gray-700"}`}
+              >
+                @{name}
+              </div>
+            ))}
+          </div>,
+          document.body
+        );
+      };
+
       // --- COMPONENTS ---
 
-      const EmailView = ({ actions, onSendEmail }) => {
+      function normalizeRecipient(raw) {
+        return (raw || "").replace(/^inbox:/i, "").trim();
+      }
+      function isAbeAgent(name) {
+        return (name || "").toLowerCase().startsWith("abe-");
+      }
+      function isHumanAgent(name) {
+        return (name || "").toLowerCase().startsWith("human-");
+      }
+
+      const EmailView = ({ actions, onSendEmail, heartbeats }) => {
         const [filterFrom, setFilterFrom] = useState("");
         const [filterTo, setFilterTo] = useState("");
+        const [selectedInbox, setSelectedInbox] = useState("all");
         const [composeTo, setComposeTo] = useState("");
         const [composeMsg, setComposeMsg] = useState("");
+
+        const agents = useMemo(() => {
+          const names = new Set();
+          (heartbeats || []).forEach(hb => {
+            if (hb.data?.abe) names.add(hb.data.abe);
+          });
+          return [...names].sort();
+        }, [heartbeats]);
+
+        const composeMsgRef = useRef(null);
+        const emailMention = useAtMention(agents, composeMsgRef, setComposeMsg);
 
         const emails = useMemo(() => {
           const seenIds = new Set();
@@ -123,6 +442,47 @@
           });
         }, [actions, filterFrom, filterTo]);
 
+        const entities = useMemo(() => {
+          const set = new Set();
+          emails.forEach(e => {
+            const sender = normalizeRecipient(e.agent);
+            const recip = normalizeRecipient(e.recipient);
+            if (!isAbeAgent(sender) && !isHumanAgent(sender)) set.add(sender);
+            if (!isAbeAgent(recip) && !isHumanAgent(recip)) set.add(recip);
+          });
+          return [...set].sort();
+        }, [emails]);
+
+        const filteredEmails = useMemo(() => {
+          if (selectedInbox === "all") return emails;
+          if (selectedInbox === "abe") {
+            return emails.filter(e =>
+              isAbeAgent(normalizeRecipient(e.agent)) && isAbeAgent(normalizeRecipient(e.recipient))
+            );
+          }
+          if (selectedInbox === "human") {
+            return emails.filter(e =>
+              isHumanAgent(normalizeRecipient(e.agent)) || isHumanAgent(normalizeRecipient(e.recipient))
+            );
+          }
+          return emails.filter(e => {
+            const sender = normalizeRecipient(e.agent).toLowerCase();
+            const recip = normalizeRecipient(e.recipient).toLowerCase();
+            const target = selectedInbox.toLowerCase();
+            return sender === target || recip === target;
+          });
+        }, [emails, selectedInbox]);
+
+        const emailCursorRef = useRef(null);
+
+        React.useLayoutEffect(() => {
+          if (composeMsgRef.current) autoResize(composeMsgRef.current);
+          if (emailCursorRef.current !== null && composeMsgRef.current) {
+            composeMsgRef.current.setSelectionRange(emailCursorRef.current, emailCursorRef.current);
+            emailCursorRef.current = null;
+          }
+        });
+
         const handleSend = (e) => {
           e.preventDefault();
           if (!composeTo || !composeMsg) return;
@@ -130,14 +490,47 @@
           setComposeMsg("");
         };
 
+        const handleEmailKeyDown = (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            emailMention.handleKeyDown(e);
+            if (!emailMention.popupVisible) {
+              e.preventDefault();
+              handleSend(e);
+            }
+          } else if (e.key === "Enter" && e.shiftKey) {
+            e.preventDefault();
+            const el = composeMsgRef.current;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            emailCursorRef.current = start + 1;
+            setComposeMsg(prev => prev.slice(0, start) + "\n" + prev.slice(end));
+          } else {
+            emailMention.handleKeyDown(e);
+          }
+        };
+
         return (
           <div className="flex flex-col h-full glass-panel rounded-lg m-2">
             <div className="p-3 border-b border-gray-700 bg-gray-800 rounded-t-lg flex flex-col gap-2">
               <div className="flex justify-between items-center">
                 <span className="font-bold">📧 Secure Uplink (Email)</span>
-                <span className="text-xs text-gray-500">
-                  {emails.length} found
-                </span>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={selectedInbox}
+                    onChange={(e) => setSelectedInbox(e.target.value)}
+                    className="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-white"
+                  >
+                    <option value="all">All</option>
+                    <option value="abe">Internal (Abe Fleet)</option>
+                    <option value="human">Human Operators</option>
+                    {entities.map(name => (
+                      <option key={name} value={name}>{name}</option>
+                    ))}
+                  </select>
+                  <span className="text-xs text-gray-500">
+                    {filteredEmails.length} found
+                  </span>
+                </div>
               </div>
               <div className="flex gap-2">
                 <input
@@ -156,18 +549,26 @@
             </div>
 
             <div className="p-3 border-b border-gray-700 bg-gray-800/50">
-              <form onSubmit={handleSend} className="flex gap-2">
-                <input
-                  placeholder="To: abe-xx"
+              <form onSubmit={handleSend} className="flex gap-2 relative">
+                <MentionPopup visible={emailMention.popupVisible} agents={emailMention.filteredAgents} selectedIndex={emailMention.selectedIndex} onSelect={emailMention.handleSelect} anchorRef={composeMsgRef} />
+                <select
                   value={composeTo}
                   onChange={(e) => setComposeTo(e.target.value)}
                   className="w-32 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white"
-                />
-                <input
+                >
+                  <option value="">To...</option>
+                  {agents.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+                <textarea
+                  rows="1"
+                  ref={composeMsgRef}
                   placeholder="Message content..."
                   value={composeMsg}
-                  onChange={(e) => setComposeMsg(e.target.value)}
-                  className="flex-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white"
+                  onChange={(e) => { setComposeMsg(e.target.value); emailMention.handleInputChange(e); }}
+                  onKeyDown={handleEmailKeyDown}
+                  className="flex-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white resize-none overflow-y-auto max-h-32"
                 />
                 <button
                   type="submit"
@@ -179,7 +580,7 @@
             </div>
 
             <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin">
-              {emails.map((e, i) => (
+              {filteredEmails.map((e, i) => (
                 <div
                   key={i}
                   className="border border-gray-700 bg-gray-800/30 rounded p-3 hover:bg-gray-800 transition-colors"
@@ -194,12 +595,15 @@
                     </div>
                     <span>{formatTime(e.timestamp_intent)}</span>
                   </div>
-                  <div className="text-sm text-gray-200 whitespace-pre-wrap font-sans">
-                    {e.message}
-                  </div>
+                  <div
+                    className="text-sm text-gray-200 font-sans prose prose-invert prose-sm max-w-none"
+                    dangerouslySetInnerHTML={% raw %}{{
+                      __html: DOMPurify.sanitize(marked.parse(e.message || ""))
+                    }}{% endraw %}
+                  />
                 </div>
               ))}
-              {emails.length === 0 && (
+              {filteredEmails.length === 0 && (
                 <div className="text-gray-500 text-center mt-10">
                   No emails matching filter.
                 </div>
@@ -218,10 +622,10 @@
 
         const agents = useMemo(() => {
           const map = {};
-          map["Human-Abe"] = {
+          map[HUMAN_NAME] = {
             lastSeen: Date.now() / 1000,
             host: "dashboard",
-            display: "Human-Abe",
+            display: HUMAN_NAME,
           };
 
           heartbeats.forEach((hb) => {
@@ -272,12 +676,62 @@
         );
       };
 
-      const DigestPanel = ({ digests }) => {
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [digests]
+      const TokenUsagePanel = ({ entries }) => {
+        const containerRef = useAutoScroll([entries]);
+
+        const utilizationColor = (pct) => {
+          const p = parseFloat(pct);
+          if (p >= 80) return "bg-red-500";
+          if (p >= 50) return "bg-yellow-500";
+          return "bg-green-500";
+        };
+
+        return (
+          <div className="flex flex-col flex-1 glass-panel rounded-lg mx-2 my-1 p-2 min-h-0">
+            <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1 flex justify-between">
+              <span>Token Usage</span>
+              <span className="text-[10px] opacity-50">{entries.length}</span>
+            </h2>
+            <div ref={containerRef} className="flex-1 overflow-y-auto space-y-1 font-mono scrollbar-thin">
+              {entries.map((e, i) => {
+                const d = e.data || {};
+                const pct = parseFloat(d.utilization_pct || 0);
+                const total = parseInt(d.total_tokens || 0);
+                const limit = parseInt(d.context_limit || 32768);
+                return (
+                  <div key={i} className="bg-gray-800/40 border border-gray-700 rounded p-2 text-[10px]">
+                    <div className="flex justify-between items-center mb-1">
+                      <span className="text-cyan-400 font-bold">{d.source}/{d.agent}</span>
+                      <span className="text-gray-500">{formatTime(d.ts)}</span>
+                    </div>
+                    <div className="text-gray-400 truncate mb-1" title={d.model}>{d.model}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="flex-1 bg-gray-700 rounded-full h-1.5">
+                        <div
+                          className={`h-1.5 rounded-full ${utilizationColor(pct)}`}
+                          style={% raw %}{{ width: `${Math.min(pct, 100)}%` }}{% endraw %}
+                        />
+                      </div>
+                      <span className="text-gray-300 whitespace-nowrap">
+                        {total.toLocaleString()} / {limit.toLocaleString()} ({pct.toFixed(1)}%)
+                      </span>
+                    </div>
+                    <div className="text-gray-500 mt-0.5">
+                      ↑{parseInt(d.prompt_tokens||0).toLocaleString()} ↓{parseInt(d.completion_tokens||0).toLocaleString()}
+                      {parseInt(d.cached_tokens||0) > 0 && (
+                        <span className="text-teal-500 ml-1">⚡{parseInt(d.cached_tokens).toLocaleString()} cached</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         );
+      };
+
+      const DigestPanel = ({ digests }) => {
+        const containerRef = useAutoScroll([digests]);
 
         // Robust parser for the "Serialization Trap"
         const parseParticipants = (raw) => {
@@ -297,12 +751,12 @@
         };
 
         return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
+          <div className="flex flex-col flex-1 glass-panel rounded-lg mx-2 my-1 p-2 min-h-0">
              <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1 flex justify-between">
               <span>Ambient Messages</span>
               <span className="text-[10px] opacity-50">{digests.length}</span>
             </h2>
-            <div className="flex-1 overflow-y-auto space-y-3 font-sans scrollbar-thin">
+            <div ref={containerRef} className="flex-1 overflow-y-auto space-y-3 font-sans scrollbar-thin">
               {digests.map((d, i) => {
                 const data = d.data || {};
                 const participants = parseParticipants(data.participants);
@@ -330,25 +784,35 @@
                 );
               })}
               {digests.length === 0 && <div className="text-xs text-gray-600 text-center italic mt-10">No bursts detected yet.</div>}
-              <div ref={bottomRef} />
             </div>
           </div>
         );
       };
 
       const ActionLog = ({ events }) => {
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [events]
-        );
+        const containerRef = useAutoScroll([events]);
+        const dedupedEvents = useMemo(() => {
+          const seen = new Map();
+          // Process in reverse so "completed" (written later) is seen first
+          for (let i = events.length - 1; i >= 0; i--) {
+            try {
+              const entry = JSON.parse(events[i].data.entry || "{}");
+              const key = entry.id || events[i].id; // fallback to stream ID
+              if (!seen.has(key)) {
+                seen.set(key, events[i]);
+              }
+            } catch { continue; }
+          }
+          // Restore chronological order
+          return [...seen.values()].reverse();
+        }, [events]);
         return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
+          <div className="flex flex-col flex-1 glass-panel rounded-lg mx-2 my-1 p-2 min-h-0">
             <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1">
               Action Log
             </h2>
-            <div className="flex-1 overflow-y-auto space-y-3 font-mono text-xs scrollbar-thin">
-              {events.map((e, i) => {
+            <div ref={containerRef} className="flex-1 overflow-y-auto space-y-3 font-mono text-xs scrollbar-thin">
+              {dedupedEvents.map((e, i) => {
                 let entry = {};
                 try {
                   entry = JSON.parse(e.data.entry || "{}");
@@ -361,6 +825,8 @@
                     ? "text-green-400"
                     : entry.status === "pending"
                     ? "text-yellow-400"
+                    : ["error", "failed", "self_correcting", "interrupted"].includes(entry.status)
+                    ? "text-red-400"
                     : "text-blue-400";
 
                 return (
@@ -395,25 +861,217 @@
                   </div>
                 );
               })}
-              <div ref={bottomRef} />
             </div>
           </div>
         );
       };
 
-      const ChatWindow = ({ channel, messages, onSend, identity }) => {
-        const [input, setInput] = useState("");
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [messages]
+      const isErrorEntry = (entry) => {
+        const errorStatuses = ['error', 'self_correcting', 'interrupted', 'failed'];
+        if (errorStatuses.includes(entry.status)) return true;
+        const r = entry.results || {};
+        if (r.error || r.status === 'error' || r.status === 'failed') return true;
+        if (typeof entry.reasoning === 'string' && entry.reasoning.startsWith('Error:')) return true;
+        return false;
+      };
+
+      const getErrorMessage = (entry) => {
+        const r = entry.results || {};
+        return r.error || r.message || (entry.reasoning?.startsWith('Error:') ? entry.reasoning : null) || 'Unknown error';
+      };
+
+      const ErrorPanel = ({ events }) => {
+        const [filterType, setFilterType] = useState("all");
+        const [filterAgent, setFilterAgent] = useState("all");
+        const [filterText, setFilterText] = useState("");
+
+        const allErrors = useMemo(() => {
+          const seen = new Map();
+          for (let i = events.length - 1; i >= 0; i--) {
+            try {
+              const entry = JSON.parse(events[i].data.entry || "{}");
+              const key = entry.id || events[i].id;
+              if (!seen.has(key)) seen.set(key, { streamEvent: events[i], entry });
+            } catch { continue; }
+          }
+          return [...seen.values()]
+            .filter(({ entry }) => isErrorEntry(entry))
+            .reverse();
+        }, [events]);
+
+        // Derive unique agents and status types for filter dropdowns
+        const uniqueAgents = useMemo(() => {
+          const agents = new Set();
+          allErrors.forEach(({ entry }) => { if (entry.agent) agents.add(entry.agent); });
+          return [...agents].sort();
+        }, [allErrors]);
+
+        const uniqueStatuses = useMemo(() => {
+          const statuses = new Set();
+          allErrors.forEach(({ entry }) => { if (entry.status) statuses.add(entry.status); });
+          return [...statuses].sort();
+        }, [allErrors]);
+
+        // Apply filters
+        const filteredErrors = useMemo(() => {
+          return allErrors.filter(({ entry }) => {
+            if (filterType !== "all" && entry.status !== filterType) return false;
+            if (filterAgent !== "all" && entry.agent !== filterAgent) return false;
+            if (filterText) {
+              const needle = filterText.toLowerCase();
+              const msg = getErrorMessage(entry).toLowerCase();
+              const tool = (entry.action?.tool || "").toLowerCase();
+              const reasoning = (entry.reasoning || "").toLowerCase();
+              const agent = (entry.agent || "").toLowerCase();
+              if (!msg.includes(needle) && !tool.includes(needle) && !reasoning.includes(needle) && !agent.includes(needle)) return false;
+            }
+            return true;
+          });
+        }, [allErrors, filterType, filterAgent, filterText]);
+
+        const containerRef = useAutoScroll([filteredErrors]);
+
+        const statusBadge = (status) => {
+          if (status === 'error' || status === 'failed')
+            return <span className="text-[10px] bg-red-900/50 text-red-300 border border-red-800 px-1 rounded font-bold uppercase">{status}</span>;
+          if (status === 'self_correcting')
+            return <span className="text-[10px] bg-orange-900/50 text-orange-300 border border-orange-800 px-1 rounded font-bold uppercase">self-correcting</span>;
+          if (status === 'interrupted')
+            return <span className="text-[10px] bg-yellow-900/50 text-yellow-300 border border-yellow-800 px-1 rounded font-bold uppercase">interrupted</span>;
+          return null;
+        };
+
+        const selectStyle = "bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-500 transition-colors";
+
+        return (
+          <div className="flex flex-col h-full glass-panel rounded-lg m-2">
+            {/* Header */}
+            <div className="p-3 border-b border-gray-700 bg-gray-800 rounded-t-lg">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-red-400 tracking-wider">ERRORS</span>
+                  {allErrors.length > 0 && (
+                    <span className="text-[10px] bg-red-900/50 text-red-300 border border-red-800 px-1.5 py-0.5 rounded-full font-bold">
+                      {filteredErrors.length === allErrors.length ? allErrors.length : `${filteredErrors.length} / ${allErrors.length}`}
+                    </span>
+                  )}
+                </div>
+                {(filterType !== "all" || filterAgent !== "all" || filterText) && (
+                  <button
+                    onClick={() => { setFilterType("all"); setFilterAgent("all"); setFilterText(""); }}
+                    className="text-[10px] text-gray-500 hover:text-red-400 transition-colors px-2 py-0.5 border border-gray-700 rounded"
+                  >
+                    Clear Filters
+                  </button>
+                )}
+              </div>
+              {/* Filters Row */}
+              <div className="flex items-center gap-2 flex-wrap">
+                <select value={filterType} onChange={(e) => setFilterType(e.target.value)} className={selectStyle}>
+                  <option value="all">All Types</option>
+                  {uniqueStatuses.map(s => (
+                    <option key={s} value={s}>{s === 'self_correcting' ? 'Self-Correcting' : s.charAt(0).toUpperCase() + s.slice(1)}</option>
+                  ))}
+                </select>
+                <select value={filterAgent} onChange={(e) => setFilterAgent(e.target.value)} className={selectStyle}>
+                  <option value="all">All Agents</option>
+                  {uniqueAgents.map(a => <option key={a} value={a}>{a}</option>)}
+                </select>
+                <input
+                  value={filterText}
+                  onChange={(e) => setFilterText(e.target.value)}
+                  placeholder="Search errors..."
+                  className="flex-1 min-w-[120px] bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded px-2 py-1.5 focus:outline-none focus:border-red-500 transition-colors"
+                />
+              </div>
+            </div>
+
+            {/* Error List */}
+            <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-3 font-mono text-xs scrollbar-thin">
+              {filteredErrors.length === 0 && (
+                <div className="text-gray-600 text-center italic mt-10">
+                  {allErrors.length === 0 ? "No errors detected." : "No errors match the current filters."}
+                </div>
+              )}
+              {filteredErrors.map(({ streamEvent, entry }, i) => (
+                <div
+                  key={i}
+                  className="border-l-2 border-red-800 pl-3 py-2 hover:bg-red-950/20 transition-colors bg-red-950/10 rounded-r"
+                >
+                  <div className="flex justify-between text-gray-500 mb-1 items-center">
+                    <span className="font-bold text-blue-300">{entry.agent}</span>
+                    <span>{formatTime(entry.timestamp_intent || "")}</span>
+                  </div>
+                  <div className="flex items-center gap-1.5 mb-1">
+                    <span className="text-red-400 font-bold">{entry.action?.tool || "Unknown Tool"}</span>
+                    {statusBadge(entry.status)}
+                  </div>
+                  <div className="text-red-300/80 mb-1 break-all bg-red-950/30 px-2 py-1.5 rounded text-[11px] leading-relaxed">
+                    {getErrorMessage(entry)}
+                  </div>
+                  {/* Tool Args */}
+                  <div className="text-gray-500 mb-1 break-all opacity-60 text-[10px]">
+                    {JSON.stringify(entry.action || {}).slice(0, 200)}
+                    {JSON.stringify(entry.action || {}).length > 200 ? "..." : ""}
+                  </div>
+                  {entry.reasoning && !entry.reasoning.startsWith('Error:') && (
+                    <div className="text-gray-500 italic pl-2 border-l border-gray-600 mt-1">
+                      "{entry.reasoning}"
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
         );
+      };
+
+      const ChatWindow = ({ channel, messages, onSend, identity, heartbeats }) => {
+        const [input, setInput] = useState("");
+        const containerRef = useAutoScroll([messages]);
+        const inputRef = useRef(null);
+
+        const agents = useMemo(() => {
+          const names = new Set();
+          (heartbeats || []).forEach(hb => { if (hb.data?.abe) names.add(hb.data.abe); });
+          return [...names].sort();
+        }, [heartbeats]);
+
+        const mention = useAtMention(agents, inputRef, setInput);
+        const cursorPosRef = useRef(null);
+
+        React.useLayoutEffect(() => {
+          if (inputRef.current) autoResize(inputRef.current);
+          if (cursorPosRef.current !== null && inputRef.current) {
+            inputRef.current.setSelectionRange(cursorPosRef.current, cursorPosRef.current);
+            cursorPosRef.current = null;
+          }
+        });
 
         const handleSubmit = (e) => {
           e.preventDefault();
           if (!input.trim()) return;
           onSend(channel, input);
           setInput("");
+        };
+
+        const handleKeyDown = (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            mention.handleKeyDown(e);
+            if (!mention.popupVisible) {
+              e.preventDefault();
+              handleSubmit(e);
+            }
+          } else if (e.key === "Enter" && e.shiftKey) {
+            e.preventDefault();
+            const el = inputRef.current;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            cursorPosRef.current = start + 1;
+            setInput(prev => prev.slice(0, start) + "\n" + prev.slice(end));
+          } else {
+            mention.handleKeyDown(e);
+          }
         };
 
         const displayChannel = channel
@@ -430,9 +1088,9 @@
                 </span>
               )}
             </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
+            <div ref={containerRef} className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
               {messages.map((m, i) => {
-                const isMe = m.data.from === identity || m.data.from === "Human-Abe";
+                const isMe = m.data.from === identity || m.data.from === HUMAN_NAME;
                 return (
                   <div
                     key={i}
@@ -462,17 +1120,19 @@
                   </div>
                 );
               })}
-              <div ref={bottomRef} />
             </div>
             <form
               onSubmit={handleSubmit}
-              className="p-3 border-t border-gray-700"
+              className="p-3 border-t border-gray-700 relative"
             >
-              <input
-                type="text"
+              <MentionPopup visible={mention.popupVisible} agents={mention.filteredAgents} selectedIndex={mention.selectedIndex} onSelect={mention.handleSelect} anchorRef={inputRef} />
+              <textarea
+                rows="1"
+                ref={inputRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500 transition-colors"
+                onChange={(e) => { setInput(e.target.value); mention.handleInputChange(e); }}
+                onKeyDown={handleKeyDown}
+                className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500 transition-colors resize-none overflow-y-auto max-h-32"
                 placeholder={`Message #${displayChannel} as ${identity}...`}
               />
             </form>
@@ -483,7 +1143,7 @@
       const App = () => {
         const [socket, setSocket] = useState(null);
         const [activeView, setActiveView] = useState("chat:general");
-        const [identity, setIdentity] = useState("Human-Abe"); // New Identity State
+        const [identity, setIdentity] = useState(HUMAN_NAME); // New Identity State
 
         const [chats, setChats] = useState({});
         const [actions, setActions] = useState([]);
@@ -497,75 +1157,196 @@
         // Right Panel Toggle State
         const [showLogs, setShowLogs] = useState(true);
         const [showDigests, setShowDigests] = useState(true);
+        const [showTokens, setShowTokens] = useState(true);
+        const [tokenUsage, setTokenUsage] = useState([]);
+        const [connected, setConnected] = useState(false);
+
+        // Panel resize / collapse state
+        const [leftWidth, setLeftWidth] = useState(256);
+        const [rightWidth, setRightWidth] = useState(384);
+        const [leftCollapsed, setLeftCollapsed] = useState(false);
+        const [rightCollapsed, setRightCollapsed] = useState(false);
+        const [isDragging, setIsDragging] = useState(false);
+        const leftWidthRef = useRef(256);
+        const rightWidthRef = useRef(384);
+        const prevLeftWidth = useRef(256);
+        const prevRightWidth = useRef(384);
+
+        // Sync refs when state changes (not during drag — refs stay as source of truth during drag)
+        useEffect(() => { leftWidthRef.current = leftWidth; }, [leftWidth]);
+        useEffect(() => { rightWidthRef.current = rightWidth; }, [rightWidth]);
+
+        // Auto-collapse right panel when all toggles are off
+        const allRightHidden = !showLogs && !showDigests && !showTokens;
+        useEffect(() => {
+          if (allRightHidden && !rightCollapsed) {
+            prevRightWidth.current = rightWidthRef.current;
+            setRightCollapsed(true);
+          } else if (!allRightHidden && rightCollapsed) {
+            setRightCollapsed(false);
+          }
+        }, [allRightHidden]);
+
+        const toggleLeftCollapse = () => {
+          if (!leftCollapsed) {
+            prevLeftWidth.current = leftWidthRef.current;
+            setLeftCollapsed(true);
+          } else {
+            setLeftCollapsed(false);
+            const restored = prevLeftWidth.current || 256;
+            leftWidthRef.current = restored;
+            setLeftWidth(restored);
+          }
+        };
+
+        const toggleRightCollapse = () => {
+          if (!rightCollapsed) {
+            prevRightWidth.current = rightWidthRef.current;
+            setRightCollapsed(true);
+          } else {
+            setRightCollapsed(false);
+            const restored = prevRightWidth.current || 384;
+            rightWidthRef.current = restored;
+            setRightWidth(restored);
+          }
+        };
+
+        const startResize = (side, defaultWidth) => (e) => {
+          e.preventDefault();
+          const startX = e.clientX;
+          const startWidth = side === 'left' ? leftWidthRef.current : rightWidthRef.current;
+          setIsDragging(true);
+          document.body.classList.add('is-resizing');
+
+          const onMove = (ev) => {
+            const delta = side === 'left' ? ev.clientX - startX : startX - ev.clientX;
+            const min = side === 'left' ? 180 : 280;
+            const max = side === 'left' ? 480 : 600;
+            const next = Math.min(max, Math.max(min, startWidth + delta));
+            if (side === 'left') { leftWidthRef.current = next; setLeftWidth(next); }
+            else { rightWidthRef.current = next; setRightWidth(next); }
+          };
+
+          const onUp = () => {
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+            document.body.classList.remove('is-resizing');
+            setIsDragging(false);
+          };
+
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+        };
+
+        const resetWidth = (side) => () => {
+          if (side === 'left') { leftWidthRef.current = 256; setLeftWidth(256); }
+          else { rightWidthRef.current = 384; setRightWidth(384); }
+        };
 
         useEffect(() => {
-          const ws = new WebSocket(`ws://${window.location.host}/ws`);
+          let ws = null;
+          let backoff = 1000;
+          let destroyed = false;
 
-          ws.onopen = () => console.log("Connected to Volition");
+          const connect = () => {
+            if (destroyed) return;
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
 
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(event.data);
+            ws.onopen = () => {
+              console.log("Connected to Volition");
+              setConnected(true);
+              backoff = 1000;
+              // Clear stale state so fresh history from server replaces it
+              setChats({});
+              setActions([]);
+              setDigests([]);
+              setTokenUsage([]);
+              setHeartbeats([]);
+              setSocket(ws);
+            };
 
-              if (msg.type === "channel_discovery") {
-                setChannels((prev) => {
-                  if (prev.includes(msg.channel)) return prev;
-                  const others = [...prev, msg.channel]
-                    .filter(
-                      (c) => c !== "chat:general" && c !== "chat:synchronous"
-                    )
-                    .sort();
-                  return ["chat:general", "chat:synchronous", ...others];
-                });
-              } else if (msg.type === "stream_event") {
-                if (msg.stream.startsWith("chat:")) {
-                  setChats((prev) => ({
-                    ...prev,
-                    [msg.stream]: [...(prev[msg.stream] || []), msg].sort(
-                      (a, b) =>
-                        (a.data.timestamp || "").localeCompare(
-                          b.data.timestamp || ""
-                        )
-                    ),
-                  }));
-                }
-                if (msg.stream === "volition:action_log") {
-                  setActions((prev) => {
-                    const exists = prev.some((p) => p.id === msg.id);
-                    if (exists) return prev;
-                    
-                    // Sort AND Slice to keep only the last 100
-                    const sorted = [...prev, msg].sort((a, b) => {
-                      const ta = JSON.parse(a.data.entry || "{}").timestamp_intent || "";
-                      const tb = JSON.parse(b.data.entry || "{}").timestamp_intent || "";
-                      return ta.localeCompare(tb);
-                    });
-                    
-                    return sorted.slice(-200);
-                  });
-                }
-                if (msg.stream === "volition:social_digests") {
-                    setDigests((prev) => {
-                        const exists = prev.some((p) => p.id === msg.id);
-                        if (exists) return prev;
-                        // Sort by generated_at
-                        return [...prev, msg].sort((a, b) => 
-                            (a.data.generated_at || "").localeCompare(b.data.generated_at || "")
-                        );
-                    });
-                }
-                if (msg.stream === "volition:heartbeat") {
-                  setHeartbeats((prev) => {
-                    return [...prev.slice(-100), msg];
-                  });
-                }
+            ws.onclose = () => {
+              setConnected(false);
+              setSocket(null);
+              if (!destroyed) {
+                setTimeout(connect, backoff);
+                backoff = Math.min(backoff * 2, 30000);
               }
-            } catch (e) {
-              console.error("Parse error on WS message:", e);
-            }
+            };
+
+            ws.onerror = () => ws.close();
+
+            ws.onmessage = (event) => {
+              try {
+                const msg = JSON.parse(event.data);
+
+                if (msg.type === "channel_discovery") {
+                  setChannels((prev) => {
+                    if (prev.includes(msg.channel)) return prev;
+                    const others = [...prev, msg.channel]
+                      .filter(
+                        (c) => c !== "chat:general" && c !== "chat:synchronous"
+                      )
+                      .sort();
+                    return ["chat:general", "chat:synchronous", ...others];
+                  });
+                } else if (msg.type === "stream_event") {
+                  if (msg.stream.startsWith("chat:")) {
+                    setChats((prev) => ({
+                      ...prev,
+                      [msg.stream]: [...(prev[msg.stream] || []), msg].sort(
+                        (a, b) =>
+                          (a.data.timestamp || "").localeCompare(
+                            b.data.timestamp || ""
+                          )
+                      ),
+                    }));
+                  }
+                  if (msg.stream === "volition:action_log") {
+                    setActions((prev) => {
+                      const exists = prev.some((p) => p.id === msg.id);
+                      if (exists) return prev;
+
+                      // Sort AND Slice to keep only the last 100
+                      const sorted = [...prev, msg].sort((a, b) => {
+                        const ta = JSON.parse(a.data.entry || "{}").timestamp_intent || "";
+                        const tb = JSON.parse(b.data.entry || "{}").timestamp_intent || "";
+                        return ta.localeCompare(tb);
+                      });
+
+                      return sorted.slice(-400);
+                    });
+                  }
+                  if (msg.stream === "volition:social_digests") {
+                      setDigests((prev) => {
+                          const exists = prev.some((p) => p.id === msg.id);
+                          if (exists) return prev;
+                          // Sort by generated_at
+                          return [...prev, msg].sort((a, b) =>
+                              (a.data.generated_at || "").localeCompare(b.data.generated_at || "")
+                          );
+                      });
+                  }
+                  if (msg.stream === "volition:token_usage") {
+                      setTokenUsage((prev) => [...prev.slice(-200), msg]);
+                  }
+                  if (msg.stream === "volition:heartbeat") {
+                    setHeartbeats((prev) => {
+                      return [...prev.slice(-100), msg];
+                    });
+                  }
+                }
+              } catch (e) {
+                console.error("Parse error on WS message:", e);
+              }
+            };
           };
-          setSocket(ws);
-          return () => ws.close();
+
+          connect();
+          return () => {
+            destroyed = true;
+            if (ws) ws.close();
+          };
         }, []);
 
         const handleSendChat = (channel, content) => {
@@ -590,102 +1371,285 @@
             }));
         };
 
+        // Inline style objects — computed as variables (avoids Jinja2 double-brace conflicts)
+        const noTransition = isDragging ? 'panel-no-transition' : 'panel-transition';
+        const leftPanelStyle = { width: leftCollapsed ? 48 : leftWidth, minWidth: leftCollapsed ? 48 : 180, flexShrink: 0 };
+        const rightPanelStyle = { width: rightCollapsed ? 48 : rightWidth, minWidth: rightCollapsed ? 48 : 280, flexShrink: 0 };
+        const collapsedStripStyle = { height: '100%', overflow: 'hidden', width: '100%' };
+        const collapsedScrollStyle = { flex: '1 1 0', overflowY: 'auto', overflowX: 'hidden', minHeight: 0 };
+        const collapsedFooterStyle = { flexShrink: 0 };
+
         return (
-          <div className="flex h-full bg-[#0d1117]">
-            <div className="flex flex-col w-64 glass-panel m-2 rounded-lg border-r border-gray-800">
-              <div className="p-4 text-xl font-bold text-white tracking-widest border-b border-gray-800 text-center bg-gray-900/50 rounded-t-lg">
-                VOLITION
+          <div className="flex flex-col h-full bg-[#0d1117]">
+            {!connected && (
+              <div className="bg-yellow-900/80 text-yellow-300 text-xs text-center py-1 tracking-widest font-bold shrink-0">
+                ⟳ RECONNECTING...
+              </div>
+            )}
+            <div className="flex flex-1 min-h-0">
+
+              {/* ── LEFT SIDEBAR ── */}
+              <div
+                className={`flex flex-col glass-panel m-2 rounded-lg border-r border-gray-800 ${noTransition}`}
+                style={leftPanelStyle}
+              >
+                {leftCollapsed ? (
+                  /* COLLAPSED LEFT — icon strip */
+                  <div className="flex flex-col items-center w-full" style={collapsedStripStyle}>
+                    {/* Clickable logo — expands sidebar */}
+                    <button
+                      onClick={toggleLeftCollapse}
+                      title="Expand VOLITION sidebar"
+                      className="collapsed-logo-btn"
+                    >
+                      V
+                    </button>
+                    {/* Channel icons — scrollable middle section */}
+                    <div className="flex flex-col items-center gap-1.5 py-2 px-1" style={collapsedScrollStyle}>
+                      {channels.map((ch) => (
+                        <button
+                          key={ch}
+                          onClick={() => setActiveView(ch)}
+                          title={ch.replace("chat:", "")}
+                          className={`collapsed-icon-btn ${activeView === ch ? 'active-channel' : ''}`}
+                        >
+                          #
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setActiveView("emails")}
+                        title="Uplink · Email"
+                        className={`collapsed-icon-btn ${activeView === "emails" ? 'active-email' : ''}`}
+                      >
+                        ✉
+                      </button>
+                      {/* Utilities separator */}
+                      <div className="w-4 border-t border-gray-700 my-1"></div>
+                      <button
+                        onClick={() => setActiveView("errors")}
+                        title="Errors"
+                        className={`collapsed-icon-btn ${activeView === "errors" ? 'text-red-300 bg-red-900/30 ring-1 ring-red-800' : ''}`}
+                      >
+                        !
+                      </button>
+                    </div>
+                    {/* Prominent expand button pinned to bottom */}
+                    <div className="flex items-center justify-center pb-2 pt-1" style={collapsedFooterStyle}>
+                      <button
+                        onClick={toggleLeftCollapse}
+                        title="Expand sidebar"
+                        className="sidebar-expand-btn"
+                      >
+                        ›
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* EXPANDED LEFT — full sidebar */
+                  <>
+                    {/* Header + collapse button */}
+                    <div className="flex items-center border-b border-gray-800 bg-gray-900/50 rounded-t-lg px-2">
+                      <div className="flex-1 py-4 text-xl font-bold text-white tracking-widest text-center select-none">
+                        VOLITION
+                      </div>
+                      <button
+                        onClick={toggleLeftCollapse}
+                        title="Collapse sidebar"
+                        className="sidebar-collapse-btn"
+                      >
+                        ‹
+                      </button>
+                    </div>
+
+                    {/* Identity input */}
+                    <div className="p-2 border-b border-gray-800 bg-gray-900/30">
+                      <div className="text-[10px] text-gray-500 font-bold mb-1 uppercase tracking-widest">Identity</div>
+                      <input
+                        value={identity}
+                        onChange={(e) => setIdentity(e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 text-sm text-blue-200 p-1.5 rounded focus:outline-none focus:border-blue-500"
+                        placeholder="Sender Name..."
+                      />
+                    </div>
+
+                    {/* Channel list */}
+                    <div className="p-2 space-y-1">
+                      <div className="text-[10px] text-gray-500 px-4 py-2 font-bold uppercase tracking-widest">COMMS</div>
+                      {channels.map((ch) => (
+                        <button
+                          key={ch}
+                          onClick={() => setActiveView(ch)}
+                          className={`w-full text-left px-4 py-2 rounded text-sm transition-all ${
+                            activeView === ch ? "bg-gray-800 text-white shadow-md" : "text-gray-400 hover:bg-gray-800/50"
+                          }`}
+                        >
+                          <span className="opacity-50 mr-2">#</span>
+                          {ch.replace("chat:", "")}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() => setActiveView("emails")}
+                        className={`w-full text-left px-4 py-2 rounded text-sm transition-all mt-2 ${
+                          activeView === "emails"
+                            ? "bg-blue-900/30 text-blue-300 border border-blue-800/30"
+                            : "text-gray-400 hover:bg-gray-800/50"
+                        }`}
+                      >
+                        <span className="mr-2">✉️</span>Uplink
+                      </button>
+                    </div>
+
+                    {/* Utilities */}
+                    <div className="p-2 space-y-1 border-t border-gray-800">
+                      <div className="text-[10px] text-gray-500 px-4 py-2 font-bold uppercase tracking-widest">UTILITIES</div>
+                      <button
+                        onClick={() => setActiveView("errors")}
+                        className={`w-full text-left px-4 py-2 rounded text-sm transition-all ${
+                          activeView === "errors"
+                            ? "bg-red-900/30 text-red-300 border border-red-800/30"
+                            : "text-gray-400 hover:bg-gray-800/50"
+                        }`}
+                      >
+                        <span className="mr-2">⚠</span>Errors
+                      </button>
+                    </div>
+
+                    {/* Fleet status */}
+                    <div className="flex-1 overflow-hidden flex flex-col border-t border-gray-800 mt-2">
+                      <Sidebar heartbeats={heartbeats} />
+                    </div>
+                  </>
+                )}
               </div>
 
-              {/* IDENTITY INPUT */}
-              <div className="p-2 border-b border-gray-800 bg-gray-900/30">
-                  <div className="text-[10px] text-gray-500 font-bold mb-1 uppercase tracking-widest">Identity</div>
-                  <input 
-                    value={identity}
-                    onChange={(e) => setIdentity(e.target.value)}
-                    className="w-full bg-gray-900 border border-gray-700 text-sm text-blue-200 p-1.5 rounded focus:outline-none focus:border-blue-500"
-                    placeholder="Sender Name..."
+              {/* Left resize handle */}
+              <ResizeHandle
+                hidden={leftCollapsed}
+                onMouseDown={startResize('left')}
+                onDoubleClick={resetWidth('left')}
+              />
+
+              {/* ── CENTER CONTENT ── */}
+              <div className="flex-1 flex flex-col min-w-0 py-2">
+                {activeView === "errors" ? (
+                  <ErrorPanel events={actions} />
+                ) : activeView === "emails" ? (
+                  <EmailView actions={actions} onSendEmail={handleSendEmail} heartbeats={heartbeats} />
+                ) : (
+                  <ChatWindow
+                    channel={activeView}
+                    messages={chats[activeView] || []}
+                    onSend={handleSendChat}
+                    identity={identity}
+                    heartbeats={heartbeats}
                   />
+                )}
               </div>
 
-              <div className="p-2 space-y-1">
-                <div className="text-[10px] text-gray-500 px-4 py-2 font-bold uppercase tracking-widest">
-                  COMMS
-                </div>
-                {channels.map((ch) => (
-                  <button
-                    key={ch}
-                    onClick={() => setActiveView(ch)}
-                    className={`w-full text-left px-4 py-2 rounded text-sm transition-all ${
-                      activeView === ch
-                        ? "bg-gray-800 text-white shadow-md"
-                        : "text-gray-400 hover:bg-gray-800/50"
-                    }`}
-                  >
-                    <span className="opacity-50 mr-2">#</span>
-                    {ch.replace("chat:", "")}
-                  </button>
-                ))}
-                <button
-                  onClick={() => setActiveView("emails")}
-                  className={`w-full text-left px-4 py-2 rounded text-sm transition-all mt-2 ${
-                    activeView === "emails"
-                      ? "bg-blue-900/30 text-blue-300 border border-blue-800/30"
-                      : "text-gray-400 hover:bg-gray-800/50"
-                  }`}
-                >
-                  <span className="mr-2">✉️</span>Uplink
-                </button>
+              {/* Right resize handle */}
+              <ResizeHandle
+                hidden={rightCollapsed}
+                onMouseDown={startResize('right')}
+                onDoubleClick={resetWidth('right')}
+              />
+
+              {/* ── RIGHT PANEL ── */}
+              <div
+                className={`flex flex-col py-2 pr-2 min-h-0 ${noTransition}`}
+                style={rightPanelStyle}
+              >
+                {rightCollapsed ? (
+                  /* COLLAPSED RIGHT — vertical strip */
+                  <div className="flex flex-col items-center gap-1" style={collapsedStripStyle}>
+                    {/* Expand button at top */}
+                    <button
+                      onClick={toggleRightCollapse}
+                      title="Expand panel"
+                      className="sidebar-expand-btn mb-1"
+                    >
+                      ‹
+                    </button>
+                    {/* Vertical toggle buttons — clicking re-enables and expands */}
+                    <button
+                      onClick={() => { setShowLogs(true); setRightCollapsed(false); }}
+                      title="Show Logs"
+                      className={`collapsed-icon-btn ${showLogs ? 'text-blue-300 bg-blue-900/30' : 'text-gray-500'}`}
+                    >
+                      L
+                    </button>
+                    <button
+                      onClick={() => { setShowDigests(true); setRightCollapsed(false); }}
+                      title="Show Digests"
+                      className={`collapsed-icon-btn ${showDigests ? 'text-purple-300 bg-purple-900/30' : 'text-gray-500'}`}
+                    >
+                      D
+                    </button>
+                    <button
+                      onClick={() => { setShowTokens(true); setRightCollapsed(false); }}
+                      title="Show Tokens"
+                      className={`collapsed-icon-btn ${showTokens ? 'text-cyan-300 bg-cyan-900/30' : 'text-gray-500'}`}
+                    >
+                      T
+                    </button>
+                  </div>
+                ) : (
+                  /* EXPANDED RIGHT — full panel */
+                  <>
+                    {/* Toggle controls row */}
+                    <div className="flex items-center gap-1 mb-1 px-1">
+                      <button
+                        onClick={() => setShowLogs(!showLogs)}
+                        className={`text-[10px] px-2 py-0.5 rounded border flex-1 transition-colors ${showLogs ? 'bg-blue-900/30 border-blue-800 text-blue-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
+                      >
+                        LOGS
+                      </button>
+                      <button
+                        onClick={() => setShowDigests(!showDigests)}
+                        className={`text-[10px] px-2 py-0.5 rounded border flex-1 transition-colors ${showDigests ? 'bg-purple-900/30 border-purple-800 text-purple-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
+                      >
+                        DIGESTS
+                      </button>
+                      <button
+                        onClick={() => setShowTokens(!showTokens)}
+                        className={`text-[10px] px-2 py-0.5 rounded border flex-1 transition-colors ${showTokens ? 'bg-cyan-900/30 border-cyan-800 text-cyan-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
+                      >
+                        TOKENS
+                      </button>
+                      {/* Manual collapse button */}
+                      <button
+                        onClick={toggleRightCollapse}
+                        title="Collapse panel"
+                        className="sidebar-collapse-btn ml-1"
+                      >
+                        ›
+                      </button>
+                    </div>
+
+                    {/* Stacked sub-panels — flex-1 on each so gap-2 spacing is absorbed correctly */}
+                    {(() => {
+                      return (
+                        <div className="flex-1 flex flex-col min-h-0">
+                          {showLogs && (
+                            <div className="flex-1 min-h-0 flex flex-col transition-all duration-300">
+                              <ActionLog events={actions} />
+                            </div>
+                          )}
+                          {showDigests && (
+                            <div className="flex-1 min-h-0 flex flex-col transition-all duration-300">
+                              <DigestPanel digests={digests} />
+                            </div>
+                          )}
+                          {showTokens && (
+                            <div className="flex-1 min-h-0 flex flex-col transition-all duration-300">
+                              <TokenUsagePanel entries={tokenUsage} />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </>
+                )}
               </div>
-
-              <div className="flex-1 overflow-hidden flex flex-col border-t border-gray-800 mt-2">
-                <Sidebar heartbeats={heartbeats} />
-              </div>
-            </div>
-
-            <div className="flex-1 flex flex-col min-w-0 py-2">
-              {activeView === "emails" ? (
-                <EmailView actions={actions} onSendEmail={handleSendEmail} />
-              ) : (
-                <ChatWindow
-                  channel={activeView}
-                  messages={chats[activeView] || []}
-                  onSend={handleSendChat}
-                  identity={identity}
-                />
-              )}
-            </div>
-
-            <div className="w-96 flex flex-col py-2 pr-2 h-full">
-               {/* Toggle Controls */}
-               <div className="flex justify-end gap-1 mb-1 px-2">
-                  <button 
-                    onClick={() => setShowLogs(!showLogs)} 
-                    className={`text-[10px] px-2 py-0.5 rounded border ${showLogs ? 'bg-blue-900/30 border-blue-800 text-blue-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
-                  >
-                    LOGS
-                  </button>
-                  <button 
-                    onClick={() => setShowDigests(!showDigests)} 
-                    className={`text-[10px] px-2 py-0.5 rounded border ${showDigests ? 'bg-purple-900/30 border-purple-800 text-purple-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
-                  >
-                    DIGESTS
-                  </button>
-               </div>
-
-               {/* Stacked Panels */}
-               <div className="flex-1 flex flex-col min-h-0 gap-2">
-                  {showLogs && (
-                      <div className={`${showDigests ? 'h-1/2' : 'h-full'} transition-all duration-300`}>
-                        <ActionLog events={actions} />
-                      </div>
-                  )}
-                  {showDigests && (
-                      <div className={`${showLogs ? 'h-1/2' : 'h-full'} transition-all duration-300`}>
-                        <DigestPanel digests={digests} />
-                      </div>
-                  )}
-               </div>
             </div>
           </div>
         );

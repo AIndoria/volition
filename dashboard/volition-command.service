@@ -13,6 +13,7 @@ Environment=REDIS_HOST= 127.0.0.1
 Environment=REDIS_PORT=6379
 # volition is the default password unless you changed it during genesis
 Environment=REDIS_PASSWORD=volition 
+# Environment=HUMAN_NAME=Human-Abe
 
 ExecStart=/opt/volition/venv/bin/python /opt/volition/volition_dashboard.py
 

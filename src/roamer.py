@@ -39,6 +39,16 @@ DEFAULT_MODEL = os.environ.get("MODEL_ROAMER", "qwen-2.5-14b-coder")
 DEFAULT_REDIS_URL = os.environ.get("REDIS_URL", "")
 MAX_TURNS = 15
 
+CONTEXT_LIMITS = {
+    "google/gemini-3-flash-preview": 1_048_576,
+    "google/gemini-2.5-flash-preview": 1_048_576,
+    "google/gemini-2.5-pro-preview": 1_048_576,
+    "mistral": 32_768,
+    "qwen-2.5-14b-coder": 32_768,
+    "nanbeige-4.1-3b": 8_192,
+}
+DEFAULT_CONTEXT_LIMIT = 32_768
+
 # LOGGING
 logging.basicConfig(level=logging.INFO, format="[ROAMER] %(message)s")
 logger = logging.getLogger("roamer")
@@ -199,6 +209,29 @@ PROTOCOL:
                     temperature=0.1 # Low temp for precise logic
                 )
                 msg = response.choices[0].message
+
+                # Token usage telemetry
+                if response.usage and DEFAULT_REDIS_URL:
+                    try:
+                        u = response.usage
+                        ctx_limit = CONTEXT_LIMITS.get(self.model, DEFAULT_CONTEXT_LIMIT)
+                        total = u.total_tokens or 0
+                        r_telem = redis.from_url(DEFAULT_REDIS_URL, decode_responses=True)
+                        r_telem.xadd("volition:token_usage", {
+                            "source": "roamer",
+                            "agent": f"roamer-{self.shell.target_host}",
+                            "model": self.model,
+                            "prompt_tokens": str(u.prompt_tokens or 0),
+                            "completion_tokens": str(u.completion_tokens or 0),
+                            "total_tokens": str(total),
+                            "context_limit": str(ctx_limit),
+                            "utilization_pct": f"{(total / ctx_limit) * 100:.1f}",
+                            "ts": datetime.utcnow().isoformat()
+                        })
+                        r_telem.close()
+                    except Exception:
+                        pass
+
             except Exception as e:
                 self._report_failure(f"LLM API Failure: {e}")
                 return
