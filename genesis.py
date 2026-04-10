@@ -13,6 +13,7 @@ Role:
 """
 
 import os
+import re
 import sys
 import subprocess
 import json
@@ -109,6 +110,20 @@ def prompt(text, default=None):
             val = input(f"{GREEN}[?]{RESET} {text}: ").strip()
             if val: return val
 
+def find_latest_debian_template():
+    try:
+        out = run_cmd(["pveam", "available", "--section", "system"])
+    except Exception:
+        print(f"{RED}[FAIL] Unable to query pveam. Is this a Proxmox host?{RESET}")
+        sys.exit(1)
+    matches = re.findall(r'(debian-12-standard_[\d.]+-\d+_amd64\.tar\.zst)', out)
+    if not matches:
+        print(f"{RED}[FAIL] No debian-12-standard template found in pveam available.{RESET}")
+        print("Try: pveam update")
+        sys.exit(1)
+    return sorted(matches)[-1]
+
+
 def ensure_debian_template(template_name):
     print(f"{YELLOW}Checking for LXC template: {template_name}{RESET}")
     try:
@@ -130,7 +145,7 @@ def ensure_debian_template(template_name):
         print("You may need to:")
         print("  - Check internet connectivity on the Proxmox host")
         print("  - Verify storage 'local' exists and is enabled")
-        print("Try: pveam update && pveam download local debian-12-standard_12.7-1_amd64.tar.zst")
+        print(f"Try: pveam update && pveam download local {template_name}")
         sys.exit(1)
 
 
@@ -205,6 +220,9 @@ def main():
     redis_host = prompt("Redis Host", "10.0.0.0")
     redis_port = prompt("Redis Port", "6379")
     redis_pass = prompt("Redis Password", "volition")
+    print(f"{YELLOW}Installing redis-tools on host...{RESET}")
+    run_cmd(["apt-get", "install", "-y", "-qq", "redis-tools"])
+    print(f"{GREEN}[OK] redis-tools installed.{RESET}")
     check_redis_connectivity(redis_host, redis_port, redis_pass)
 
     print("\n[Search Config]")
@@ -582,7 +600,7 @@ WantedBy=multi-user.target
           print(f"{RED}VMID {vmid} is also in use. Aborting.{RESET}")
           sys.exit(1)
 
-    template = "debian-12-standard_12.7-1_amd64.tar.zst"
+    template = find_latest_debian_template()
     ensure_debian_template(template)
 
     print(f"{YELLOW}Creating Container...{RESET}")
@@ -721,24 +739,6 @@ WantedBy=multi-user.target
             
         run_cmd(["pct", "push", vmid, "/tmp/guppi.service", "/etc/systemd/system/guppi.service"])
         os.remove("/tmp/guppi.service")
-            # --- 4.4.1 Redis Sanity Check (from inside container) ---
-        print(f"{CYAN}--- REDIS SANITY CHECK (Container -> Redis) ---{RESET}")
-        try:
-            out = run_cmd([
-                "pct", "exec", vmid, "--",
-                "redis-cli",
-                "-h", redis_host,
-                "-p", str(redis_port),
-                "-a", redis_pass,
-                "PING"
-            ])
-            if out.strip() != "PONG":
-                raise RuntimeError(out)
-            print(f"{GREEN}[OK] Container can reach Redis.{RESET}")
-        except Exception as e:
-            print(f"{RED}[FAIL] Container cannot reach Redis: {e}{RESET}")
-            print("Fix Redis networking/auth before continuing.")
-            sys.exit(1)
 
     else:
         print(f"{YELLOW}Warning: guppi.service not found in src/{RESET}")
@@ -885,6 +885,8 @@ Host parent_node {host_hostname}
     
     bootstrap_script = """#!/bin/bash
 set -e
+export LANG=C
+export LC_ALL=C
 export DEBIAN_FRONTEND=noninteractive
 
 echo "[*] Updating Apt..."
@@ -922,6 +924,25 @@ echo "[SUCCESS] Bootstrap Complete."
     print(run_cmd(["pct", "exec", vmid, "--", "bash", "/root/bootstrap_volition.sh"]))
     
     os.remove("/tmp/bootstrap_volition.sh")
+
+    # --- Redis Sanity Check (from inside container, after redis-tools is installed) ---
+    print(f"{CYAN}--- REDIS SANITY CHECK (Container -> Redis) ---{RESET}")
+    try:
+        out = run_cmd([
+            "pct", "exec", vmid, "--",
+            "redis-cli",
+            "-h", redis_host,
+            "-p", str(redis_port),
+            "-a", redis_pass,
+            "PING"
+        ])
+        if out.strip() != "PONG":
+            raise RuntimeError(out)
+        print(f"{GREEN}[OK] Container can reach Redis.{RESET}")
+    except Exception as e:
+        print(f"{RED}[FAIL] Container cannot reach Redis: {e}{RESET}")
+        print("Fix Redis networking/auth before continuing.")
+        sys.exit(1)
 
     print(f"\n{GREEN}=== GENESIS COMPLETE ==={RESET}")
     print(f"Container: {agent_name} ({vmid})")
