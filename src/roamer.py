@@ -232,7 +232,12 @@ PROTOCOL:
                         return
 
                     elif func_name == "execute_shell":
-                        output = self.shell.execute(args.get("command"))
+                        cmd = args.get("command")
+                        if not isinstance(cmd, str) or not cmd.strip():
+                            output = "ERROR: Missing or empty 'command' argument for execute_shell tool."
+                            logger.error(output)
+                        else:
+                            output = self.shell.execute(cmd)
                         
                         if self.debug_mode:
                             print(f"\n--- CMD OUT ---\n{output}\n---------------")
