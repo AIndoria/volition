@@ -117,7 +117,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("guppi")
 
-if not NTFY_URL or not NTFY_TOKEN:
+if not NTFY_URL:
     logger.warning("NTFY not configured; human notifications disabled.")
     
 
@@ -2035,7 +2035,7 @@ You were asleep for: {time_str}
                 return
             
             elif tool in ("notify_human", "alert_human"):
-                if not NTFY_URL or not NTFY_TOKEN:
+                if not NTFY_URL:
                     result = {
                         "status": "skipped",
                         "reason": "ntfy_not_configured. Human may not be contactable. You might have to wait until they check in."
@@ -2044,7 +2044,9 @@ You were asleep for: {time_str}
                     msg = action.get("message", "")
                     prio = action.get("priority", "default")
                     kind = "ALERT" if tool == "alert_human" else "NOTIFY"
-                    headers = { "Priority": prio, "Authorization": f"Bearer {NTFY_TOKEN}" }
+                    headers = {"Priority": prio}
+                    if NTFY_TOKEN:
+                        headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
 
                     try:
                         timeout = aiohttp.ClientTimeout(total=5)
