@@ -1088,18 +1088,6 @@ class GuppiDaemon:
                     logger.error(f"Failed to write stub: {e}")
             return # <--- EXIT without Thinking
         
-        # B0. Scribe Failure Detection (must check before generic maintenance gate)
-        event_type_b = norm["observed"].get("event_type", norm["observed"].get("event", ""))
-        if event_type_b == "ScribeFailed":
-            content_str = str(norm["observed"].get("content", ""))
-            source_file = meta.get("source_tier_1", "unknown")
-            await self.log_guppi_event(
-                "ScribeFailed",
-                f"Scribe failed for {source_file}: {content_str[:200]}",
-                source="GUPPI:Background"
-            )
-            return  # EXIT without Thinking
-
         # B. Silent Scribe / Background Tasks
         if meta.get("maintenance") is True:
             if meta.get("is_auto_prune"):
@@ -1147,7 +1135,17 @@ class GuppiDaemon:
                     logger.warning(f"Failed to clean up temp prompt file {prompt_file}: {e}")
             return # <--- EXIT without Thinking
 
-
+        # B2. Scribe Failure Detection
+        event_type_b = norm["observed"].get("event_type", norm["observed"].get("event", ""))
+        if event_type_b == "ScribeFailed":
+            content_str = str(norm["observed"].get("content", ""))
+            source_file = meta.get("source_tier_1", "unknown")
+            await self.log_guppi_event(
+                "ScribeFailed",
+                f"Scribe failed for {source_file}: {content_str[:200]}",
+                source="GUPPI:Background"
+            )
+            return  # EXIT without Thinking
         # 5. THINKING TRIGGER (The 7.2.3 Safety)
         # We pass norm["observed"] (The Envelope) so the LLM sees 'from', 'meta', and 'raw'.
         # GPT hates this because it's "messy", but it prevents context loss.
@@ -1696,9 +1694,11 @@ class GuppiDaemon:
 
     def _clean_json(self, text_response, thought_sig=None):
         try:
-            match = re.search(r'\{.*\}', text_response, re.DOTALL)
-            clean_json = match.group(0) if match else text_response
-            parsed = json.loads(clean_json)
+            content = text_response.strip()
+            match = re.search(r"```(?:json)?\s*(.*?)\s*```", content, re.DOTALL)
+            if match:
+                content = match.group(1).strip()
+            parsed = json.loads(content)
 
             # Guard: IF LLM sometimes returns a JSON array instead of an object
             if isinstance(parsed, list):

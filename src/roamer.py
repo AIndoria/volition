@@ -169,7 +169,7 @@ YOUR DIRECTIVE: {self.directive}
 TOOLS AVAILABLE:
 1. execute_shell: Run a shell command. 
    - CONSTRAINTS: READ-ONLY. Allowed: ls, cat, grep, find, head, tail, df, du, journalctl.
-   - FORBIDDEN: rm, mv, cp, nano, vim, sed -i, > redirection, sudo.
+   - FORBIDDEN: rm, mv, cp, nano, vim, sed -i, > redirection, sudo(allowed with limits).
    - If the user asks for a fix, INVESTIGATE first, then propose the fix in your final report. DO NOT execute it.
 
 2. finish_investigation: Call this when you have found the answer or failed.
@@ -295,7 +295,6 @@ PROTOCOL:
                         # Feed result back to history
                         self.history.append({
                             "role": "tool",
-                            "tool_call_id": call_id,
                             "tool_call_id": call_id,
                             "content": output
                         })
