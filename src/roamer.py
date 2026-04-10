@@ -179,7 +179,7 @@ PROTOCOL:
 - You are in a loop. You observe -> think -> act.
 - Do not hallucinate file contents. cat them.
 - Do not guess paths. ls them.
-- If you hit "Permission denied", report it; do not try to sudo.
+- If you hit "Permission denied" for any WRITE task, report it; do not try to sudo. You can sudo any read task.
 - Keep your turns efficient.
 """
 
@@ -226,12 +226,15 @@ PROTOCOL:
                         ):
                             logger.info("Intercepted inline JSON tool call. Normalizing.")
 
+                            args = parsed_content["arguments"]
+                            args_str = args if isinstance(args, str) else json.dumps(args)
+
                             assistant_entry["tool_calls"] = [{
                                 "id": f"call_fallback_{turn}",
                                 "type": "function",
                                 "function": {
                                     "name": parsed_content["name"],
-                                    "arguments": json.dumps(parsed_content["arguments"])
+                                    "arguments": args_str
                                 }
                             }]
 
