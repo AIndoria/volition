@@ -49,10 +49,11 @@ class SafeShell:
     ALLOWED_CMDS = [
         "ls", "cat", "grep", "head", "tail", "find", 
         "stat", "df", "du", "whoami", "date", "echo", 
-        "awk", "sed", "cut", "sort", "uniq", "wc", "uptime", "free"
+        "awk", "sed", "cut", "sort", "uniq", "wc", "uptime", "free",
+        "systemctl", "journalctl", "sudo"
     ]
 
-    FORBIDDEN_FLAGS = ["-i", "sudo", "su"]
+    FORBIDDEN_FLAGS = ["-i", "su"]
     
     # Hostnames must not start with '-' to avoid option injection in ssh-like commands.
     HOSTNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$")
@@ -87,8 +88,14 @@ class SafeShell:
             if not tokens: return False, "Empty command in pipeline."
                 
             base = tokens[0]
+            # If they use sudo, shift the base command check to the next token
+            if base == "sudo":
+                if len(tokens) < 2:
+                    return False, "Empty sudo command."
+                base = tokens[1]
+                
             if base not in self.ALLOWED_CMDS:
-                return False, f"Command '{base}' is not in the read-only whitelist."
+                return False, f"Command '{base}' in pipeline is not in the read-only whitelist."
 
             if any(f in tokens for f in self.FORBIDDEN_FLAGS):
                 return False, f"Forbidden flag detected in '{base}' segment."
@@ -139,7 +146,10 @@ class RoamerAgent:
         self.shell = SafeShell(target_host)
         self.output_inbox = output_inbox
         self.debug_mode = debug_mode
-        self.model = model or DEFAULT_MODEL
+        # Standardize the model string
+        raw_model = model or DEFAULT_MODEL
+        self.model = raw_model.replace("local/", "") if raw_model.startswith("local/") else raw_model
+        
         
         url = api_url or DEFAULT_API_URL
         self.client = OpenAI(base_url=url, api_key=DEFAULT_API_KEY)
@@ -189,38 +199,71 @@ PROTOCOL:
                     temperature=0.1 # Low temp for precise logic
                 )
                 msg = response.choices[0].message
-                # Normalize assistant message into a plain dict for history so it doesn't crash turn 2
-                assistant_entry = {
-                    "role": msg.role,
-                    "content": msg.content,
-                }
-                if getattr(msg, "tool_calls", None):
-                    assistant_entry["tool_calls"] = [
-                        {
-                            "id": tc.id,
-                            "type": tc.type,
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            }
-                        } for tc in msg.tool_calls
-                    ]
-                self.history.append(assistant_entry)
             except Exception as e:
                 self._report_failure(f"LLM API Failure: {e}")
                 return
 
-            # 2. Check for Tool Calls
-            if msg.tool_calls:
-                for tool_call in msg.tool_calls:
-                    func_name = tool_call.function.name
+            # Normalize assistant message into a plain dict for history
+            assistant_entry = {
+                "role": msg.role,
+                "content": msg.content,
+            }
+            
+            # --- OLLAMA FALLBACK INTERCEPTOR ---
+            # If native tool_calls is empty, check if it dumped JSON directly into content
+            if not getattr(msg, "tool_calls", None) and msg.content:
+                content_str = msg.content.strip()
+                try:
+                    # Strip markdown code blocks if the LLM wrapped it
+                    if content_str.startswith("```json"): 
+                        content_str = content_str[7:-3].strip()
+                    elif content_str.startswith("```"): 
+                        content_str = content_str[3:-3].strip()
+                    
+                    parsed_content = json.loads(content_str)
+                    if isinstance(parsed_content, dict) and "name" in parsed_content and "arguments" in parsed_content:
+                        logger.info("Intercepted inline JSON tool call. Normalizing.")
+                        # Fake the tool call structure so the rest of the loop understands it
+                        assistant_entry["tool_calls"] = [{
+                            "id": f"call_fallback_{turn}",
+                            "type": "function",
+                            "function": {
+                                "name": parsed_content["name"],
+                                "arguments": json.dumps(parsed_content["arguments"])
+                            }
+                        }]
+                        assistant_entry["content"] = "" # Blank out content to avoid confusing the context
+                except Exception:
+                    pass # Not JSON, just regular chatting
+            
+            # Native tool call handling
+            elif getattr(msg, "tool_calls", None):
+                assistant_entry["tool_calls"] = [
+                    {
+                        "id": tc.id,
+                        "type": tc.type,
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        }
+                    } for tc in msg.tool_calls
+                ]
+            
+            self.history.append(assistant_entry)
+
+            # 2. Check for Tool Calls (Using our normalized entry!)
+            if "tool_calls" in assistant_entry:
+                for tool_call in assistant_entry["tool_calls"]:
+                    func_name = tool_call["function"]["name"]
+                    call_id = tool_call["id"]
+                    
                     try:
-                        args = json.loads(tool_call.function.arguments)
+                        args = json.loads(tool_call["function"]["arguments"])
                     except json.JSONDecodeError:
                         logger.error("LLM generated invalid JSON arguments")
                         self.history.append({
                             "role": "tool",
-                            "tool_call_id": tool_call.id,
+                            "tool_call_id": call_id,
                             "content": "ERROR: Invalid JSON arguments provided."
                         })
                         continue
@@ -245,12 +288,12 @@ PROTOCOL:
                         # Feed result back to history
                         self.history.append({
                             "role": "tool",
-                            "tool_call_id": tool_call.id,
+                            "tool_call_id": call_id,
                             "content": output
                         })
             else:
                 # If LLM talks without tools, just push it back as user prompt to force action
-                content = msg.content or ""
+                content = assistant_entry.get("content") or ""
                 logger.warning(f"LLM replied without tools: {content[:50]}...")
                 self.history.append({
                     "role": "user", 

@@ -192,7 +192,7 @@ async def main():
             await push_result(
                 args.redis_url, 
                 args.output_inbox, 
-                "ScribeResult", 
+                "ScribeResult",
                 result_text,
                 meta=meta
             )

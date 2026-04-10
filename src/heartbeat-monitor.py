@@ -22,7 +22,7 @@ NTFY_URL = os.environ.get("NTFY_URL")
 
 # FAIL LOUD: No default token in code. Export NTFY_TOKEN in your shell/systemd.
 NTFY_TOKEN = os.environ.get("NTFY_TOKEN")
-NTFY_ENABLED = bool(NTFY_TOKEN and NTFY_URL)
+NTFY_ENABLED = bool(NTFY_URL)
 
 
 # TUNING
@@ -37,15 +37,17 @@ def send_alert(abe_name, last_seen_str):
 
     print(f"[!] FLATLINE: {abe_name} (Last seen: {last_seen_str})")
     try:
+        headers = {
+            "Title": f"Abe Down: {abe_name}",
+            "Priority": "urgent",
+            "Tags": "skull,rotating_light",
+        }
+        if NTFY_TOKEN:
+            headers["Authorization"] = f"Bearer {NTFY_TOKEN}"
         requests.post(
             NTFY_URL,
             data=f"🚑 FLATLINE DETECTED: {abe_name} has not reported in since {last_seen_str}.",
-            headers={
-                "Title": f"Abe Down: {abe_name}",
-                "Priority": "urgent",
-                "Tags": "skull,rotating_light",
-                "Authorization": f"Bearer {NTFY_TOKEN}"
-            },
+            headers=headers,
             timeout=5
         )
     except Exception as e:
