@@ -1087,6 +1087,18 @@ class GuppiDaemon:
                 except Exception as e:
                     logger.error(f"Failed to write stub: {e}")
             return # <--- EXIT without Thinking
+        
+        # B0. Scribe Failure Detection (must check before generic maintenance gate)
+        event_type_b = norm["observed"].get("event_type", norm["observed"].get("event", ""))
+        if event_type_b == "ScribeFailed":
+            content_str = str(norm["observed"].get("content", ""))
+            source_file = meta.get("source_tier_1", "unknown")
+            await self.log_guppi_event(
+                "ScribeFailed",
+                f"Scribe failed for {source_file}: {content_str[:200]}",
+                source="GUPPI:Background"
+            )
+            return  # EXIT without Thinking
 
         # B. Silent Scribe / Background Tasks
         if meta.get("maintenance") is True:
@@ -1473,7 +1485,7 @@ class GuppiDaemon:
             event_type = event_data.get("event")
             is_chat = (event_type == "Chat")
             
-            if force_model:
+            if force_model is not None:
                 model = force_model
                 is_flash = (model == MODEL_FLASH)
             else:
@@ -1528,7 +1540,7 @@ class GuppiDaemon:
             tool = action.get("tool")
 
             # Implicit Escalation
-            if is_flash and tool in FLASH_FORBIDDEN_TOOLS:
+            if is_flash and tool in FLASH_FORBIDDEN_TOOLS and force_model is None:
                 logger.warning(f"ESCALATION: Flash attempted {tool}. Waking Pro.")
                 await self.log_guppi_event("EscalationTrigger", f"Denied Flash tool: {tool}")
 
@@ -1687,6 +1699,17 @@ class GuppiDaemon:
             match = re.search(r'\{.*\}', text_response, re.DOTALL)
             clean_json = match.group(0) if match else text_response
             parsed = json.loads(clean_json)
+
+            # Guard: IF LLM sometimes returns a JSON array instead of an object
+            if isinstance(parsed, list):
+                candidates = [
+                    x for x in parsed
+                    if isinstance(x, dict) and ("action" in x or "reasoning" in x)
+                ]
+                if len(candidates) == 1:
+                    parsed = candidates[0]
+                else:
+                    raise LLMOutputError("Ambiguous or invalid JSON array from LLM")
 
             # Active Decontamination
             keys_to_scrub = ["thought_signature", "thoughtSignature"]
