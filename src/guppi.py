@@ -1486,13 +1486,16 @@ class GuppiDaemon:
             if force_model is not None:
                 model = force_model
                 is_flash = (model == MODEL_FLASH)
+                target_url = os.environ.get("FLASH_API_URL") if is_flash else os.environ.get("PRO_API_URL")
             else:
                 if is_chat:
                     model = MODEL_FLASH
                     is_flash = True
+                    target_url = os.environ.get("FLASH_API_URL")
                 else:
                     model = MODEL_PRO
                     is_flash = False
+                    target_url = os.environ.get("PRO_API_URL")
             
             logger.info(f"Think Cycle: {event_type} -> {model} (Urgent: {is_urgent})")
             
@@ -1591,11 +1594,11 @@ class GuppiDaemon:
                 try: await self.r.lpush(f"inbox:{self.abe_name}", json.dumps(alert))
                 except: pass
 
-    async def call_abe_api(self, prompt_text: str, model_id: str = GEMINI_MODEL) -> Dict:
+    async def call_abe_api(self, prompt_text: str, model_id: str = GEMINI_MODEL, api_url: str = None) -> Dict:
         # Everything routes through the OpenAI-compatible endpoint now
-        return await self._call_openai_compat(model_id, prompt_text)
+        return await self._call_openai_compat(model_id, prompt_text, api_url)
     
-    async def _call_openai_compat(self, model_id, prompt):
+    async def _call_openai_compat(self, model_id, prompt, api_url=None):
         # 1. Detect Thinking Intent
         use_thinking = ":thinking" in model_id
         if use_thinking: 
@@ -1603,9 +1606,8 @@ class GuppiDaemon:
 
         # 2. Split-Brain Routing (Local vs Remote)
         if model_id.startswith("local/"):
-            # For Guppi: os.environ.get("GUPPI_LOCAL_API_URL", ...)
-            # For Scribe: os.environ.get("SCRIBE_API_URL", ...)
-            base_url = os.environ.get("GUPPI_LOCAL_API_URL", "http://127.0.0.1:8080/v1").rstrip('/')
+            # Clean decoupling: use the passed URL, or fallback to a safe default
+            base_url = (api_url or os.environ.get("PRO_API_URL", "http://127.0.0.1:8080/v1")).rstrip('/')
             api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
             actual_model = model_id.replace("local/", "")
         else:
@@ -1873,6 +1875,8 @@ You were asleep for: {time_str}
             elif tool == "spawn_roamer":
                 directive = action.get("directive")
                 target_host = action.get("target_host", "local")
+                target_url = os.environ.get("ROAMER_API_URL", "http://127.0.0.1:8080/v1")
+                roamer_model = os.environ.get("MODEL_ROAMER", "local/qwen-2.5-14b-coder")
                 
                 if not directive:
                     result = {"status": "error", "message": "Missing directive for roamer"}
@@ -1881,7 +1885,9 @@ You were asleep for: {time_str}
                         sys.executable, str(BIN_DIR / "roamer.py"),
                         "--directive", directive,
                         "--target-host", target_host,
-                        "--output-inbox", f"inbox:{self.abe_name}"
+                        "--output-inbox", f"inbox:{self.abe_name}",
+                        "--api-url", target_url,
+                        "--model", roamer_model
                     ]
                     # Spawn untracked so GUPPI isn't blocked waiting for the investigation
                     await self._spawn_subprocess_exec(turn_id, cmd, tracked=False)
@@ -1895,10 +1901,13 @@ You were asleep for: {time_str}
                 # Enforce routing rules based on the Genesis prompt promises
                 if mode == "analyze":
                     model = os.environ.get("MODEL_SCRIBE", "local/nanbeige-4.1-3B")
+                    target_url = os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:8080/v1")
                 elif mode == "summarize":
                     model = os.environ.get("MODEL_SUMMARIZE", "local/mistral")
+                    target_url = os.environ.get("SUMMARIZE_API_URL", "http://127.0.0.1:8080/v1")
                 else:
                     model = MODEL_FLASH # Fallback just in case
+                    target_url = os.environ.get("FLASH_API_URL")
 
                 # v6.5: Intercept Vectorize requests
                 if mode == "vectorize":
@@ -1958,8 +1967,9 @@ You were asleep for: {time_str}
 
                     cmd = [
                         sys.executable, str(BIN_DIR / "scribe.py"), 
-                        "--model", model, 
-                        "--prompt-file", final_prompt_file, 
+                        "--model", model,
+                        "--api-url", target_url,
+                        "--prompt-file", final_prompt_file,
                         "--output-inbox", f"inbox:{self.abe_name}",
                         "--mode", mode,
                         "--meta", json.dumps(meta_dict)
