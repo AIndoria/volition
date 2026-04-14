@@ -148,6 +148,7 @@ class RoamerAgent:
         self.debug_mode = debug_mode
         # Standardize the model string
         raw_model = model or DEFAULT_MODEL
+        self.is_local = raw_model.startswith("local/")
         self.model = raw_model.replace("local/", "") if raw_model.startswith("local/") else raw_model
         
         

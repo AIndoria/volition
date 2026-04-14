@@ -36,7 +36,13 @@ MODEL_EMBED = os.environ.get("MODEL_EMBED", "local/nomic-embed-text")
 MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "local/mistral") 
 
 # Routing URLs & Fallbacks
-legacy_ollama = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434/api").replace("/api", "/v1")
+raw_ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+clean_ollama_base = raw_ollama_url.rstrip("/")
+if clean_ollama_base.endswith("/api"):
+    clean_ollama_base = clean_ollama_base[:-4]
+elif clean_ollama_base.endswith("/v1"):
+    clean_ollama_base = clean_ollama_base[:-3]
+legacy_ollama = f"{clean_ollama_base}/v1"
 
 PRO_API_URL = os.environ.get("PRO_API_URL", legacy_ollama).rstrip('/')
 # FIX: Safely fallback to Ollama
