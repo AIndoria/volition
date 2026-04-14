@@ -746,13 +746,14 @@ class GuppiDaemon:
             })
             
             current_model = MODEL_SUMMARIZE
-            
+            target_url = os.environ.get("SUMMARIZE_API_URL", "http://127.0.0.1:8080/v1")
             cmd = [
                 sys.executable, str(BIN_DIR / "scribe.py"), 
                 "--model", current_model, 
                 "--prompt-file", prompt_path, 
                 "--output-inbox", f"inbox:{self.abe_name}",
                 "--mode", "summarize",
+                "--api-url", target_url,
                 "--meta", meta_json
             ]
 
@@ -1610,11 +1611,13 @@ class GuppiDaemon:
             base_url = (api_url or os.environ.get("PRO_API_URL", "http://127.0.0.1:8080/v1")).rstrip('/')
             api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
             actual_model = model_id.replace("local/", "")
+            req_timeout = 1200 # Give local hardware time to think, especially if you're on like qwen3.5 or some such
         else:
             base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
             # Safely check for either env var without throwing a NameError
             api_key = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
             actual_model = model_id
+            req_timeout = 120  # Fail fast on remote API hangs -- 2 mins is good enough.
             if not api_key:
                 logger.error("FATAL: No remote API key configured. Forcing hibernation.")
                 return {
@@ -1657,7 +1660,7 @@ class GuppiDaemon:
             payload["reasoning"] = {"effort": "high"}
 
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=1200) as resp:
+            async with session.post(url, headers=headers, json=payload, timeout=req_timeout) as resp:
                 if resp.status != 200:
                     err = await resp.text()
                     logger.error(f"OpenAI-Compat Error {resp.status}: {err}")
@@ -2254,13 +2257,14 @@ You were asleep for: {time_str}
             meta_json = json.dumps({"job_type": "update_stub", "maintenance": True})
             # Use current flash model for the compression task
             current_model = MODEL_FLASH
-            
+            target_url = os.environ.get("FLASH_API_URL", "http://127.0.0.1:8080/v1")
             cmd = [
                 sys.executable, str(BIN_DIR / "scribe.py"),
                 "--model", current_model,
                 "--prompt-file", prompt_path,
                 "--output-inbox", f"inbox:{self.abe_name}",
                 "--mode", "summarize",
+                "--api-url", target_url,
                 "--meta", meta_json
             ]
             await self._spawn_subprocess_exec("priors-update", cmd, tracked=False)

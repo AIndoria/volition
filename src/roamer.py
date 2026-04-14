@@ -152,7 +152,9 @@ class RoamerAgent:
         
         
         url = api_url or DEFAULT_API_URL
-        self.client = OpenAI(base_url=url, api_key=DEFAULT_API_KEY)
+        req_timeout = 1200.0 if self.is_local else 120.0
+
+        self.client = OpenAI(base_url=url, api_key=DEFAULT_API_KEY, timeout=req_timeout)
         
         self.history = [
             {"role": "system", "content": self._build_system_prompt(target_host)}
