@@ -1510,7 +1510,7 @@ class GuppiDaemon:
             
             # [7.8.1] RETRY LOGIC WRAPPER
             try:
-                response_payload = await self.call_abe_api(context, model_id=model)
+                response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
             except LLMOutputError as e:
                 if retry_count < 1:
                     logger.warning(f"⚠️ Malformed JSON from {model}. Escalating to PRO for repair.")
@@ -1907,7 +1907,7 @@ You were asleep for: {time_str}
                     target_url = os.environ.get("SUMMARIZE_API_URL", "http://127.0.0.1:8080/v1")
                 else:
                     model = MODEL_FLASH # Fallback just in case
-                    target_url = os.environ.get("FLASH_API_URL")
+                    target_url = os.environ.get("FLASH_API_URL", "http://127.0.0.1:8080/v1")
 
                 # v6.5: Intercept Vectorize requests
                 if mode == "vectorize":

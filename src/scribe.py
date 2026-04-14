@@ -84,7 +84,7 @@ async def run_llm_generation(model_name: str, prompt_text: str, api_url: str = N
 
     # 2. Split-Brain Routing (Local vs Remote)
     if model_id.startswith("local/"):
-        base_url = (api_url or os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:11434/v1")).rstrip('/')
+        base_url = (api_url or os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:8080/v1")).rstrip('/')
         api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
         actual_model = model_id.replace("local/", "")
     else:
