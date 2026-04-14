@@ -143,6 +143,9 @@ class LLMOutputError(Exception):
     """Raised when the LLM returns garbage that json.loads hates."""
     pass
 
+class ContextLengthExceededError(Exception):
+    """Raised when the LLM API returns a 400 Context Length Exceeded error."""
+    pass
 
 # [NEW] Volition 7.8: Clipboard Class
 class Clipboard:
@@ -1113,7 +1116,15 @@ class GuppiDaemon:
                     if isinstance(prune_size, int):
                         logger.info("Tier 2 Episode successfully generated. Pruning working memory.")
                         async with self.log_lock:
-                            drop_count = max(0, prune_size - 10) # Keep last 10 entries as buffer
+                            # We only summarized a max of 20 entries
+                            summarized_count = min(prune_size, 20) 
+                            retained_count = 10
+                            
+                            drop_count = max(0, summarized_count - retained_count)
+                            
+                            if drop_count < max(0, prune_size - retained_count):
+                                logger.warning(f"Limiting prune drop_count to {drop_count} to avoid deleting unsummarized history.")
+                                
                             self.log_buffer = self.log_buffer[drop_count:]
                             await self._rewrite_log_file()
                     else:
@@ -1512,15 +1523,12 @@ class GuppiDaemon:
             # [7.8.1] RETRY LOGIC WRAPPER
             try:
                 response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
-            except ValueError as ve:
-                if str(ve) == "context_length_exceeded":
-                    logger.warning(f"Context window shattered ({model}). Engaging Panic Mode (dropping oldest memories/history) and retrying.")
-                    
-                    # Rebuild context with panic_mode=True
-                    context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data, panic_mode=True)
-                    response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
-                else:
-                    raise
+            except ContextLengthExceededError:
+                logger.warning(f"Context window shattered ({model}). Engaging Panic Mode (dropping oldest memories) and retrying.")
+                
+                # Rebuild context with panic_mode=True
+                context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data, panic_mode=True)
+                response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
             except LLMOutputError as e:
                 if retry_count < 1:
                     logger.warning(f"⚠️ Malformed JSON from {model}. Escalating to PRO for repair.")
@@ -1674,10 +1682,21 @@ class GuppiDaemon:
                     err = await resp.text()
                     logger.error(f"OpenAI-Compat Error {resp.status}: {err}")
                     
-                    # Intercept the exact 400 Context Exceeded error
-                    if resp.status == 400 and ("context" in err.lower() or "tokens" in err.lower()):
-                        raise ValueError("context_length_exceeded")
-                        
+                    if resp.status == 400:
+                        is_context_error = False
+                        try:
+                            # Safely check the JSON error payload
+                            err_msg = json.loads(err).get("error", {}).get("message", "").lower()
+                            if "context" in err_msg or "tokens" in err_msg:
+                                is_context_error = True
+                        except:
+                            # Fallback if the API returned raw text instead of JSON
+                            if "context" in err.lower() or "tokens" in err.lower():
+                                is_context_error = True
+                                
+                        if is_context_error:
+                            raise ContextLengthExceededError("Context window shattered")
+                    
                     return {"reasoning": f"API Error: {resp.status}", "action": {"tool": "hibernate"}}
                 
                 data = await resp.json()
@@ -1771,7 +1790,7 @@ class GuppiDaemon:
 
         # v7.0: DYNAMIC PRUNING LOGIC
         # If sleep > 1 hour (3600s), use Orientation + 3 items.
-        # Else, use Standard 20 items.
+        # Else, use Standard 15 items.
 
         use_orientation = False
         
