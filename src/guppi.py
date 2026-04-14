@@ -935,7 +935,7 @@ class GuppiDaemon:
 
                 # cheap check only
                 if len(self.log_buffer) > 20 and not self._is_pruning:
-                    logger.info(f"Entered buffer greater than 20 and not self.is_pruning block.")
+                    logger.info(f"Entered buffer greater than 20 and not self._is_pruning block.")
                     asyncio.create_task(self._prune_logs())
 
             except Exception as e:
