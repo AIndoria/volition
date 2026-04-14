@@ -707,10 +707,10 @@ class GuppiDaemon:
             
             async with self.log_lock:
                 prune_size = len(self.log_buffer)
-                buffer_snapshot = list(self.log_buffer[-30:])
+                buffer_snapshot = list(self.log_buffer[-20:])
             try:
-                # Grab the last 30 entries safely truncated
-                log_content = self._sanitize_history_block(limit=30, buffer_override=buffer_snapshot)
+                # Grab the last 20 entries safely truncated
+                log_content = self._sanitize_history_block(limit=20, buffer_override=buffer_snapshot)
             except Exception as e:
                 log_content = f"Error reading log: {e}"
 
@@ -931,8 +931,8 @@ class GuppiDaemon:
                     self._is_pruning = False
 
                 # cheap check only
-                if len(self.log_buffer) > 30 and not self._is_pruning:
-                    logger.info(f"Entered buffer greater than 30 and not self.is_pruning block.")
+                if len(self.log_buffer) > 20 and not self._is_pruning:
+                    logger.info(f"Entered buffer greater than 20 and not self.is_pruning block.")
                     asyncio.create_task(self._prune_logs())
 
             except Exception as e:
@@ -1113,7 +1113,7 @@ class GuppiDaemon:
                     if isinstance(prune_size, int):
                         logger.info("Tier 2 Episode successfully generated. Pruning working memory.")
                         async with self.log_lock:
-                            drop_count = max(0, prune_size - 15)
+                            drop_count = max(0, prune_size - 10) # Keep last 10 entries as buffer
                             self.log_buffer = self.log_buffer[drop_count:]
                             await self._rewrite_log_file()
                     else:
@@ -1512,6 +1512,15 @@ class GuppiDaemon:
             # [7.8.1] RETRY LOGIC WRAPPER
             try:
                 response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
+            except ValueError as ve:
+                if str(ve) == "context_length_exceeded":
+                    logger.warning(f"Context window shattered ({model}). Engaging Panic Mode (dropping oldest memories/history) and retrying.")
+                    
+                    # Rebuild context with panic_mode=True
+                    context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data, panic_mode=True)
+                    response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
+                else:
+                    raise
             except LLMOutputError as e:
                 if retry_count < 1:
                     logger.warning(f"⚠️ Malformed JSON from {model}. Escalating to PRO for repair.")
@@ -1664,6 +1673,11 @@ class GuppiDaemon:
                 if resp.status != 200:
                     err = await resp.text()
                     logger.error(f"OpenAI-Compat Error {resp.status}: {err}")
+                    
+                    # Intercept the exact 400 Context Exceeded error
+                    if resp.status == 400 and ("context" in err.lower() or "tokens" in err.lower()):
+                        raise ValueError("context_length_exceeded")
+                        
                     return {"reasoning": f"API Error: {resp.status}", "action": {"tool": "hibernate"}}
                 
                 data = await resp.json()
@@ -1729,7 +1743,7 @@ class GuppiDaemon:
             raise LLMOutputError(f"JSON Syntax Error: {str(e)}")
         
 
-    async def build_abe_context(self, current_event_data, system_notice=None, orientation_data=None):
+    async def build_abe_context(self, current_event_data, system_notice=None, orientation_data=None, panic_mode=False):
         genesis = ""
         if GENESIS_PROMPT_FILE.exists():
             try: genesis = GENESIS_PROMPT_FILE.read_text()
@@ -1740,23 +1754,27 @@ class GuppiDaemon:
         if PRIORS_STUB_FILE.exists():
             try: priors = f"\n[IDENTITY_PRIORS]\n{PRIORS_STUB_FILE.read_text().strip()}\n"
             except: pass
-        
-        summaries = ""
-        try:
-            episodes = sorted(EPISODES_DIR.glob("ep-*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]
-            for ep in episodes: summaries += f"\n--- EPISODE {ep.name} ---\n{ep.read_text()}\n"
-        except: pass
 
-        # Log Logic (Overflow safe)
+        if panic_mode:
+            summaries = "(Tier 2 Episodes Omitted to save context limits)\n"
+            recent_log_block = f"[EMERGENCY_CONTEXT]\n{self._sanitize_history_block(5)}" # Drop to last 5 turns
+            daily_log = "(Changelog Omitted)"
+        else:
+            summaries = ""
+            try:
+                episodes = sorted(EPISODES_DIR.glob("ep-*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]
+                for ep in episodes: summaries += f"\n--- EPISODE {ep.name} ---\n{ep.read_text()}\n"
+            except: pass
+            
+            recent_log_block = f"[WORKING_MEMORY_LOG]\n{self._sanitize_history_block(15)}" # <--- Changed from 20   
+            daily_log = self._get_daily_changelog_snippet()
 
-        recent_log_block = f"[WORKING_MEMORY_LOG]\n{self._sanitize_history_block(20)}"
-        
         # v7.0: DYNAMIC PRUNING LOGIC
         # If sleep > 1 hour (3600s), use Orientation + 3 items.
         # Else, use Standard 20 items.
 
         use_orientation = False
-        daily_log = self._get_daily_changelog_snippet()
+        
         if orientation_data:
             # If sleep > 1 hour, invoke orientation
             use_orientation = orientation_data.get("time_asleep", 0) > 3600
