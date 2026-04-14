@@ -1698,7 +1698,7 @@ class GuppiDaemon:
                             err_msg = json.loads(err).get("error", {}).get("message", "").lower()
                             if "context" in err_msg or "tokens" in err_msg:
                                 is_context_error = True
-                        except:
+                        except (json.JSONDecodeError, TypeError, ValueError):
                             # Fallback if the API returned raw text instead of JSON
                             if "context" in err.lower() or "tokens" in err.lower():
                                 is_context_error = True
