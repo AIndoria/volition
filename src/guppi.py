@@ -1116,16 +1116,25 @@ class GuppiDaemon:
                     if isinstance(prune_size, int):
                         logger.info("Tier 2 Episode successfully generated. Pruning working memory.")
                         async with self.log_lock:
-                            # We only summarized a max of 20 entries
-                            summarized_count = min(prune_size, 20) 
+                            # We only summarized a max of 20 entries, so only prune within
+                            # that summarized tail and leave any older unsummarized history intact.
+                            summarized_count = min(prune_size, 20)
                             retained_count = 10
-                            
-                            drop_count = max(0, summarized_count - retained_count)
-                            
-                            if drop_count < max(0, prune_size - retained_count):
-                                logger.warning(f"Limiting prune drop_count to {drop_count} to avoid deleting unsummarized history.")
-                                
-                            self.log_buffer = self.log_buffer[drop_count:]
+
+                            tail_start = max(0, len(self.log_buffer) - summarized_count)
+                            unsummarized_prefix = self.log_buffer[:tail_start]
+                            summarized_tail = self.log_buffer[tail_start:]
+
+                            drop_count = max(0, len(summarized_tail) - retained_count)
+                            intended_drop_count = max(0, prune_size - retained_count)
+
+                            if drop_count < intended_drop_count:
+                                logger.warning(
+                                    f"Limiting prune drop_count to {drop_count} to avoid deleting unsummarized history."
+                                )
+
+                            retained_tail = summarized_tail[drop_count:]
+                            self.log_buffer = unsummarized_prefix + retained_tail
                             await self._rewrite_log_file()
                     else:
                         logger.error(f"CRITICAL: Missing or invalid prune_size ({prune_size}). Skipping memory prune.")
