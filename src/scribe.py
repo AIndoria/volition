@@ -76,7 +76,7 @@ async def push_result(redis_url: str, inbox: str, event_type: str, content: Any,
         # If we can't report back, we exit non-zero so GUPPI knows (if it was tracking us)
         sys.exit(1)
 
-async def run_llm_generation(model_name: str, prompt_text: str) -> str:
+async def run_llm_generation(model_name: str, prompt_text: str, api_url: str = None) -> str:
     """Unified OpenAI-Compatible execution for Scribe."""
     model_id = model_name
     use_thinking = ":thinking" in model_id
@@ -84,9 +84,10 @@ async def run_llm_generation(model_name: str, prompt_text: str) -> str:
 
     # 2. Split-Brain Routing (Local vs Remote)
     if model_id.startswith("local/"):
-        base_url = os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:8080/v1").rstrip('/')
+        base_url = (api_url or os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:8080/v1")).rstrip('/')
         api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
         actual_model = model_id.replace("local/", "")
+        req_timeout = 1200
     else:
         base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
         # Safely check for either env var without throwing a NameError
@@ -94,6 +95,7 @@ async def run_llm_generation(model_name: str, prompt_text: str) -> str:
         if not api_key:
             raise RuntimeError("No remote API key configured. Scribe cannot run.")
         actual_model = model_id
+        req_timeout = 120
         
     url = f"{base_url}/chat/completions"
     headers = {
@@ -113,7 +115,7 @@ async def run_llm_generation(model_name: str, prompt_text: str) -> str:
 
     async with aiohttp.ClientSession() as session:
         # Bumped timeout to 1200s (20 mins) specifically to account for Nanbeige's deep thinking
-        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=1200)) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=aiohttp.ClientTimeout(total=req_timeout)) as resp:
             if resp.status != 200:
                 err = await resp.text()
                 raise Exception(f"API Error {resp.status}: {err}")
@@ -150,6 +152,7 @@ async def main():
     parser.add_argument("--prompt-file", required=True, help="Path to file containing the prompt")
     parser.add_argument("--output-inbox", required=True, help="Redis list key to push results to")
     parser.add_argument("--redis-url", default=DEFAULT_REDIS_URL, help="Redis connection URL")
+    parser.add_argument("--api-url", default=None, help="Routed API URL from GUPPI")
     
     # Pass-through metadata support
     parser.add_argument("--meta", default=None, help="JSON string of metadata to pass back to GUPPI")
@@ -186,7 +189,7 @@ async def main():
         # Group analyze with summarize so the LLM actually fires
         if args.mode in ["summarize", "analyze"]:
             # Direct generation via configured provider
-            result_text = await run_llm_generation(args.model, prompt_text)
+            result_text = await run_llm_generation(args.model, prompt_text, api_url=args.api_url)
             
             # 4. Report Success
             await push_result(

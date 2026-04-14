@@ -148,11 +148,14 @@ class RoamerAgent:
         self.debug_mode = debug_mode
         # Standardize the model string
         raw_model = model or DEFAULT_MODEL
+        self.is_local = raw_model.startswith("local/")
         self.model = raw_model.replace("local/", "") if raw_model.startswith("local/") else raw_model
         
         
         url = api_url or DEFAULT_API_URL
-        self.client = OpenAI(base_url=url, api_key=DEFAULT_API_KEY)
+        req_timeout = 1200.0 if self.is_local else 120.0
+
+        self.client = OpenAI(base_url=url, api_key=DEFAULT_API_KEY, timeout=req_timeout)
         
         self.history = [
             {"role": "system", "content": self._build_system_prompt(target_host)}

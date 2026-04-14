@@ -35,15 +35,21 @@ REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "volition")
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
 
-OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api")
-MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "mistral") 
+# Model & Routing Config
+MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "local/mistral")
 
-SUMMARIZE_BACKEND = os.environ.get("SUMMARIZE_BACKEND", "ollama").lower()
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
-OPENROUTER_MODEL_SUMMARIZE = os.environ.get(
-    "OPENROUTER_MODEL_SUMMARIZE",
-    "google/gemini-3-flash-preview"
-)
+# Graceful fallback: normalize any Ollama URL to the OpenAI-compatible /v1 base.
+raw_ollama_url = os.environ.get("OLLAMA_URL", "http://127.0.0.1:11434")
+clean_ollama_base = raw_ollama_url.rstrip("/")
+if clean_ollama_base.endswith("/api"):
+    clean_ollama_base = clean_ollama_base[:-4]
+elif clean_ollama_base.endswith("/v1"):
+    clean_ollama_base = clean_ollama_base[:-3]
+legacy_ollama = f"{clean_ollama_base}/v1"
+SUMMARIZE_API_URL = os.environ.get("SUMMARIZE_API_URL", legacy_ollama).rstrip('/')
+
+OPENAI_BASE_URL = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
+REMOTE_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
 
 
 # Tuning
@@ -95,34 +101,20 @@ class SocialRouter:
             del self.active_abes[d]
 
     async def generate_summary(self, session, conversation_text):
-        """Uses Ollama to summarize the buffered conversation."""
-        prompt = (
-            "Summarize the following chat log briefly. "
-            "Identify the participants, the main topic, and any decisions made.\n\n"
-            f"{conversation_text}"
-        )
-        payload = {
-            "model": MODEL_SUMMARIZE,
-            "prompt": prompt,
-            "stream": False
-        }
-        try:
-            # Use shared session
-            async with session.post(f"{OLLAMA_URL}/generate", json=payload) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("response")
-                else:
-                    logger.error(f"Ollama summary failed: {resp.status}")
-        except Exception as e:
-            logger.error(f"Ollama connection error: {e}")
-        return None
-    
-
-    async def generate_summary_openrouter(session, conversation_text):
-        if not OPENROUTER_API_KEY:
-            logger.error("OPENROUTER_API_KEY not set for OpenRouter summarize")
-            return None
+        """Unified OpenAI-Compatible summary generation."""
+        if MODEL_SUMMARIZE.startswith("local/"):
+            base_url = SUMMARIZE_API_URL
+            api_key = "sk-local-llama"
+            actual_model = MODEL_SUMMARIZE.replace("local/", "")
+            req_timeout = 1200
+        else:
+            base_url = OPENAI_BASE_URL
+            api_key = REMOTE_API_KEY
+            actual_model = MODEL_SUMMARIZE
+            req_timeout = 120
+            if not api_key:
+                logger.error("No remote API key configured. Ear cannot summarize.")
+                return None
 
         prompt = (
             "Summarize the following chat log briefly. "
@@ -131,33 +123,30 @@ class SocialRouter:
         )
 
         payload = {
-            "model": OPENROUTER_MODEL_SUMMARIZE,
+            "model": actual_model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7
         }
 
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"
         }
 
+        url = f"{base_url}/chat/completions"
+
         try:
-            async with session.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload
-            ) as resp:
-                if resp.status != 200:
+            async with session.post(url, headers=headers, json=payload, timeout=req_timeout) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data["choices"][0]["message"]["content"]
+                else:
                     err = await resp.text()
-                    logger.error(f"OpenRouter summary failed ({resp.status}): {err}")
-                    return None
-
-                data = await resp.json()
-                return data["choices"][0]["message"]["content"]
-
+                    logger.error(f"Summary failed ({resp.status}): {err}")
         except Exception as e:
-            logger.error(f"OpenRouter summarize exception: {e}")
-            return None
+            logger.error(f"Summarize connection error: {e}")
+        return None
+    
 
     # v7.0: Replaced broadcast_digest (Push) with publish_digest (Pull/Stream)
     async def publish_digest(self, summary, msg_count, participants):
@@ -182,10 +171,7 @@ class SocialRouter:
             logger.error(f"Failed to publish digest: {e}")
 
     async def run(self):
-        if SUMMARIZE_BACKEND == "ollama":
-            logger.info(f"Running Summarize backend: Ollama ({MODEL_SUMMARIZE})")
-        else:
-            logger.info(f"Running Summarize backend: OpenRouter ({OPENROUTER_MODEL_SUMMARIZE})")
+        logger.info(f"Starting SocialRouter with Model: {MODEL_SUMMARIZE}")
 
         
         # Init: check heartbeats immediately to populate list
@@ -256,10 +242,7 @@ class SocialRouter:
                             if msg_count >= BURST_MIN_MESSAGES:
                                 logger.info(f"Burst concluded ({msg_count} msgs). Summarizing...")
                                 full_text = "\n".join(self.chat_buffer)
-                                if SUMMARIZE_BACKEND == "openrouter":
-                                    summary = await self.generate_summary_openrouter(session, full_text)
-                                else:
-                                    summary = await self.generate_summary(session, full_text)
+                                summary = await self.generate_summary(session, full_text)
 
                                 if summary:
                                     # v7.0: Publish instead of Broadcast
