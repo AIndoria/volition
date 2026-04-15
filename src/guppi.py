@@ -947,6 +947,37 @@ class GuppiDaemon:
 
     # --- NEW TASK HANDLERS (Refractory) ---
 
+    def _parse_due_time(self, due_in_str: str) -> datetime:
+        """Parses both relative times (m, h, d) and ISO 8601 timestamps."""
+        now = datetime.utcnow()
+        if not due_in_str:
+            return now + timedelta(hours=24) # Default fallback
+            
+        # 1. Try relative time formats first
+        try:
+            if due_in_str.endswith("d"):
+                return now + timedelta(days=float(due_in_str.replace("d", "")))
+            elif due_in_str.endswith("h"):
+                return now + timedelta(hours=float(due_in_str.replace("h", "")))
+            elif due_in_str.endswith("m"):
+                return now + timedelta(minutes=float(due_in_str.replace("m", "")))
+        except ValueError:
+            pass
+
+        # 2. Try absolute ISO timestamp parsing
+        try:
+            # Handle 'Z' suffix natively
+            clean_str = due_in_str.replace("Z", "+00:00")
+            parsed_dt = datetime.fromisoformat(clean_str)
+            
+            # Normalize to naive UTC to match SQLite format expectations
+            if parsed_dt.tzinfo is not None:
+                parsed_dt = parsed_dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return parsed_dt
+        except ValueError:
+            logger.warning(f"Failed to parse time '{due_in_str}', defaulting to 24h.")
+            return now + timedelta(hours=24)
+
     async def get_alarm_sleep_time(self) -> float:
         """Calculates sleep time based on next due task."""
         try:
@@ -1493,6 +1524,11 @@ class GuppiDaemon:
 
         try:
             event_type = event_data.get("event")
+            
+            # Check if this is a direct email rather than a system inbox event
+            original_event = event_data.get("payload", {}).get("event_type", "")
+            is_human_email = (event_type == "Inbox" and original_event == "NewInboxMessage")
+            
             is_chat = (event_type == "Chat")
             
             if force_model is not None:
@@ -1500,7 +1536,8 @@ class GuppiDaemon:
                 is_flash = (model == MODEL_FLASH)
                 target_url = os.environ.get("FLASH_API_URL") if is_flash else os.environ.get("PRO_API_URL")
             else:
-                if is_chat:
+                # Route both Stream Chat and Direct Emails to Flash
+                if is_chat or is_human_email:
                     model = MODEL_FLASH
                     is_flash = True
                     target_url = os.environ.get("FLASH_API_URL")
@@ -1617,6 +1654,11 @@ class GuppiDaemon:
         return await self._call_openai_compat(model_id, prompt_text, api_url)
     
     async def _call_openai_compat(self, model_id, prompt, api_url=None):
+        # 0. Load the Identity Stats (Personality Drift)
+        # These are our baselines. If the file is missing, it defaults to 1.0 / 0.95
+        target_temp = float(self.identity.get("temp", 1.0))
+        target_top_p = float(self.identity.get("top_p", 0.95))
+
         # 1. Detect Thinking Intent
         use_thinking = ":thinking" in model_id
         if use_thinking: 
@@ -1667,10 +1709,33 @@ class GuppiDaemon:
             "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
             "temperature": target_temp,
-            "top_p": target_top_p,
-            "top_k": target_top_k
+            "top_p": target_top_p
         }
-
+        model_name_lower = actual_model.lower()
+        
+        if "qwen" in model_name_lower:
+            # Qwen Model Card: Needs strict penalties to prevent <think> loops
+            payload.update({
+                "top_k": 20,
+                "presence_penalty": 1.5,
+                "repetition_penalty": 1.0
+            })
+            
+        elif "gemma" in model_name_lower:
+            # Gemma Model Card: Standardized sampling for best performance
+            payload.update({
+                "top_k": 64,
+                "presence_penalty": 0.0,    # Gemma doesn't require high presence penalty
+                "repetition_penalty": 1.0
+            })
+            
+        else:
+            # Safe Fallbacks for Scribe/Summarizer models (like Mistral/Nanbeige)
+            payload.update({
+                "top_k": 40,
+                "presence_penalty": 0.0,
+                "repetition_penalty": 1.0
+            })
         # 3. Route the Thinking Mechanism
         # Only OpenRouter needs the explicit flag. llama.cpp handles it natively now.
         if use_thinking and "openrouter" in base_url.lower():
@@ -2220,10 +2285,7 @@ You were asleep for: {time_str}
 
     async def _tool_todo_add(self, action):
         tid = f"task-{uuid.uuid4().hex[:8]}"
-        due_in = action.get("due", "24h")
-        due_dt = datetime.utcnow()
-        if "h" in due_in: due_dt += timedelta(hours=int(due_in.replace("h", "")))
-        elif "m" in due_in: due_dt += timedelta(minutes=int(due_in.replace("m", "")))
+        due_dt = self._parse_due_time(action.get("due", "24h"))
         
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             await conn.execute("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -2233,10 +2295,7 @@ You were asleep for: {time_str}
 
     async def _tool_snooze(self, action):
         tid = action.get("task_id")
-        due_in = action.get("due_in", "1h")
-        due_dt = datetime.utcnow()
-        if "h" in due_in: due_dt += timedelta(hours=int(due_in.replace("h", "")))
-        elif "m" in due_in: due_dt += timedelta(minutes=int(due_in.replace("m", "")))
+        due_dt = self._parse_due_time(action.get("due_in", "1h"))
         
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             await conn.execute("UPDATE tasks SET due_timestamp = ? WHERE task_id = ?", (due_dt.isoformat(), tid))
