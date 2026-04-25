@@ -879,7 +879,7 @@ class GuppiDaemon:
             meta = norm["observed"].get("meta", {})
             content = str(norm["observed"].get("content", ""))
             
-            # THE FIX: Extract the event type safely from the payload envelope
+            # Extract the event type safely from the payload envelope
             event_type = norm["observed"].get("event_type", norm["observed"].get("event", ""))
             
             # Only ingest if Scribe actually succeeded (any recognized success event)
@@ -1184,18 +1184,6 @@ class GuppiDaemon:
                 except Exception as e:
                     logger.warning(f"Failed to clean up temp prompt file {prompt_file}: {e}")
             return # <--- EXIT without Thinking
-
-        # B2. Scribe Failure Detection
-        event_type_b = norm["observed"].get("event_type", norm["observed"].get("event", ""))
-        if event_type_b == "ScribeFailed":
-            content_str = str(norm["observed"].get("content", ""))
-            source_file = meta.get("source_tier_1", "unknown")
-            await self.log_guppi_event(
-                "ScribeFailed",
-                f"Scribe failed for {source_file}: {content_str[:200]}",
-                source="GUPPI:Background"
-            )
-            return  # EXIT without Thinking
         # 5. THINKING TRIGGER (The 7.2.3 Safety)
         # We pass norm["observed"] (The Envelope) so the LLM sees 'from', 'meta', and 'raw'.
         # GPT hates this because it's "messy", but it prevents context loss.
@@ -2229,6 +2217,7 @@ You were asleep for: {time_str}
                 lock_key = f"lock:{channel}"
                 acquired = await self.r.set(lock_key, self.abe_name, nx=True, px=DEFAULT_LOCK_TTL_MS)
                 if acquired:
+                    # 8.0.2-rc3 SILENT ACQUISITION: Do not xadd to the channel. Just notify the local Abe.
                     result = {"status": "granted", "channel": channel, "note": f"You hold the stick for {DEFAULT_LOCK_TTL_MS/1000}s. Proceed with chat_post."}
                 else:
                     current_owner = await self.r.get(lock_key)
@@ -2336,6 +2325,7 @@ You were asleep for: {time_str}
         return tools
 
     async def _tool_todo_list(self, filter_mode="due", limit=40):
+        # Enforce hard boundaries on the limit so they can't request 10,000 rows
         try:
             limit = int(limit)
         except (ValueError, TypeError):
@@ -2358,6 +2348,7 @@ You were asleep for: {time_str}
             where = "status NOT IN ('completed', 'cancelled') AND recurrence IS NOT NULL AND recurrence != ''"
             order = "due_timestamp ASC"
         elif filter_mode == "all":
+            # Safety override: 'all' now strictly means 'all active'
             where = "status NOT IN ('completed', 'cancelled')"
             order = "due_timestamp ASC"
         elif filter_mode in ("completed", "history"):
@@ -2399,7 +2390,7 @@ You were asleep for: {time_str}
 
             if not rows:
                 return 0
-
+            # Single rolling backup to prevent disk clutter
             shutil.copy2(TODO_DB, backup_file)
 
             archive_file.parent.mkdir(parents=True, exist_ok=True)
@@ -2419,7 +2410,7 @@ You were asleep for: {time_str}
             return len(rows)
 
     async def _auto_prune_todo_db_loop(self):
-        await asyncio.sleep(300)
+        await asyncio.sleep(300)  # Don't do maintenance during boot storm
 
         while not self._stopping:
             try:
@@ -2429,7 +2420,7 @@ You were asleep for: {time_str}
             except Exception:
                 logger.exception("Todo DB auto-prune failed")
 
-            await asyncio.sleep(86400)
+            await asyncio.sleep(86400) # Sleep 24 hours
 
     async def _tool_todo_add(self, action):
         tid = f"task-{uuid.uuid4().hex[:8]}"
@@ -2473,6 +2464,7 @@ You were asleep for: {time_str}
                 await conn.commit()
                 return {"status": "completed_and_rescheduled", "task_id": tid, "next_due": new_due_dt.isoformat()}
 
+            # Standard completion
             await conn.execute("UPDATE tasks SET status = 'completed' WHERE task_id = ?", (tid,))
             await conn.commit()
             return {"status": "completed", "task_id": tid}
@@ -2539,7 +2531,7 @@ You were asleep for: {time_str}
         try:
             downloaded_html = await asyncio.to_thread(trafilatura.fetch_url, url)
             if not downloaded_html: return {"error": "Failed to fetch URL"}
-
+            # Force markdown output so we don't lose code blocks and structural formatting
             text = await asyncio.to_thread(
                 trafilatura.extract,
                 downloaded_html,
@@ -2634,11 +2626,13 @@ You were asleep for: {time_str}
             limit = 5
         limit = max(1, min(limit, 10))
 
+        # Truncate logged query to save log space but keep debuggability
         logger.info(f"RAG Search requested: '{query[:50]}...' (limit={limit})")
 
         try:
             query_vector = await self._get_remote_embedding(query)
 
+            # Defend against numpy truthiness errors
             if query_vector is None or len(query_vector) == 0:
                 logger.error("RAG Search Failed: Embedding service unavailable.")
                 return [{"content": "RAG_SEARCH_ERROR: Embedding service unavailable. Memory search did not run.", "meta": {"error": "embedding_offline"}}]
@@ -2650,10 +2644,11 @@ You were asleep for: {time_str}
                         settings=Settings(anonymized_telemetry=False)
                     )
 
+                # Use get_or_create so brand new Abes don't crash on their first boot
                 collection = self.chroma_client.get_or_create_collection("tier3_memory")
 
                 if collection.count() == 0:
-                    return None
+                    return None # Explicitly signal empty db
 
                 return collection.query(
                     query_embeddings=[query_vector],
