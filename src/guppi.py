@@ -722,20 +722,23 @@ class GuppiDaemon:
                 log_content = f"Error reading log: {e}"
 
             prompt = (
-                f"Synthesize these logs into a Tier 2 Episode Memory.\n"
-                f"Focus on the NARRATIVE arc of what you accomplished or discovered.\n"
-                f"IGNORE trivial mechanical steps (e.g., successful 'ls' or 'cd' commands) unless they revealed something critical.\n"
-                f"If you were asleep or idle, state that clearly and briefly.\n\n"
-                f"REQUIRED OUTPUT FORMAT:\n\n"
+                f"You are a summarization engine. Read the following JSON logs of an AI agent's actions:\n\n"
+                f"--- SOURCE LOG START ---\n"
+                f"{log_content}\n"
+                f"--- SOURCE LOG END ---\n\n"
+                f"INSTRUCTIONS:\n"
+                f"1. Synthesize these logs into a Tier 2 Episode Memory.\n"
+                f"2. Focus on the NARRATIVE arc of what was accomplished.\n"
+                f"3. CRITICAL: If the agent was mostly asleep, idle, or performed no major actions, DO NOT invent tasks. Simply state 'No significant actions were taken.'\n\n"
+                f"You MUST use this exact markdown format:\n\n"
                 f"## Narrative Summary\n"
-                f"(A 2-3 sentence overview of the episode's main events)\n\n"
+                f"(2-3 sentences max)\n\n"
                 f"## Key Decisions & Outcomes\n"
-                f"(Bullet points of meaningful choices made and their results)\n\n"
+                f"(Bullet points. If none, write 'None')\n\n"
                 f"## Changed State / New Knowledge\n"
-                f"(What is different now compared to the start? New files? New constraints?)\n\n"
+                f"(If none, write 'None')\n\n"
                 f"## Pending / Unresolved\n"
-                f"(Only list actual blockers or unfinished tasks that require future attention that WERE in the logs, Do not make assumptions.)\n\n"
-                f"Source log:\n{log_content}"
+                f"(If none, write 'None')"
             )
             
             with tempfile.NamedTemporaryFile('w', delete=False) as pf:
@@ -2165,6 +2168,9 @@ You were asleep for: {time_str}
             elif tool == "todo_complete":
                 result = await self._tool_todo_complete(action)
 
+            elif tool == "todo_cancel":
+                result = await self._tool_todo_cancel(action)
+
             # --- v6.0 New Tools ---
             elif tool == "subscribe_channel":
                 channel = action.get("channel")
@@ -2311,6 +2317,7 @@ You were asleep for: {time_str}
             "todo_list": "List tasks. Args: filter (due|upcoming|recurring|all|completed), limit (default 40, max 100). 'all' means active tasks only. Use 'completed' for history.",
             "todo_add": "Add task. Args: task, priority, due, recurrence (optional, e.g. '24h', '7d'). If recurrence is set, completing the task will automatically reschedule it.",
             "todo_complete": "Mark a task as completed. Args: task_id",
+            "todo_cancel": "Cancel a task. Args: task_id",
             "email_send": "Send Redis msg. Args: recipient, message",
             "spawn_abe": "Clone self. Args: host, identity",
             "subscribe_channel": "Listen to a Redis Stream. Args: channel",
@@ -2339,25 +2346,25 @@ You were asleep for: {time_str}
         params = []
 
         if filter_mode == "due":
-            where = "status != 'completed' AND due_timestamp <= ?"
+            where = "status NOT IN ('completed', 'cancelled') AND due_timestamp <= ?"
             params.append(now)
             order = "due_timestamp ASC"
         elif filter_mode == "upcoming":
             future = (datetime.utcnow() + timedelta(hours=24)).isoformat()
-            where = "status != 'completed' AND due_timestamp <= ?"
+            where = "status NOT IN ('completed', 'cancelled') AND due_timestamp <= ?"
             params.append(future)
             order = "due_timestamp ASC"
         elif filter_mode == "recurring":
-            where = "status != 'completed' AND recurrence IS NOT NULL AND recurrence != ''"
+            where = "status NOT IN ('completed', 'cancelled') AND recurrence IS NOT NULL AND recurrence != ''"
             order = "due_timestamp ASC"
         elif filter_mode == "all":
-            where = "status != 'completed'"
+            where = "status NOT IN ('completed', 'cancelled')"
             order = "due_timestamp ASC"
         elif filter_mode in ("completed", "history"):
-            where = "status = 'completed'"
+            where = "status IN ('completed', 'cancelled')"
             order = "due_timestamp DESC"
         else:
-            where = "status != 'completed'"
+            where = "status NOT IN ('completed', 'cancelled')"
             order = "due_timestamp ASC"
 
         query = f"SELECT * FROM tasks WHERE {where} ORDER BY {order} LIMIT ?"
@@ -2380,7 +2387,7 @@ You were asleep for: {time_str}
             query = """
                 SELECT *
                 FROM tasks
-                WHERE status = 'completed'
+                WHERE status IN ('completed', 'cancelled')
                   AND (recurrence IS NULL OR recurrence = '')
                   AND due_timestamp < ?
                 ORDER BY due_timestamp ASC
@@ -2469,6 +2476,43 @@ You were asleep for: {time_str}
             await conn.execute("UPDATE tasks SET status = 'completed' WHERE task_id = ?", (tid,))
             await conn.commit()
             return {"status": "completed", "task_id": tid}
+
+    async def _tool_todo_cancel(self, action):
+        tid = action.get("task_id", "")
+        if not tid:
+            return {"status": "error", "message": "Missing task_id."}
+
+        if not tid.startswith("task-"):
+            tid = f"task-{tid}"
+
+        async with aiosqlite.connect(str(TODO_DB)) as conn:
+            conn.row_factory = aiosqlite.Row
+
+            async with conn.execute(
+                "SELECT task_id, description, status, recurrence FROM tasks WHERE task_id = ?",
+                (tid,),
+            ) as c:
+                row = await c.fetchone()
+
+            if not row:
+                return {"status": "error", "message": f"Task '{tid}' not found."}
+
+            if row["status"] == "cancelled":
+                return {"status": "ok", "task_id": tid, "note": "Task was already cancelled."}
+
+            await conn.execute(
+                "UPDATE tasks SET status = 'cancelled', recurrence = '' WHERE task_id = ?",
+                (tid,),
+            )
+            await conn.commit()
+
+        return {
+            "status": "cancelled",
+            "task_id": tid,
+            "description": row["description"],
+            "previous_status": row["status"],
+            "note": "Task cancelled and will no longer recur."
+        }
     
     async def _tool_web_search(self, query):
         if not query: return {"status": "error", "message": "No query"}
