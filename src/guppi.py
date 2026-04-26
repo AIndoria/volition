@@ -366,7 +366,12 @@ class GuppiDaemon:
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS tasks
                      (task_id TEXT PRIMARY KEY, description TEXT, priority INTEGER,
-                      due_timestamp TEXT, created_timestamp TEXT, source_abe TEXT, status TEXT)''')
+                      due_timestamp TEXT, created_timestamp TEXT, source_abe TEXT, status TEXT,
+                      recurrence TEXT DEFAULT '')''')
+        c.execute("PRAGMA table_info(tasks)")
+        columns = {row[1] for row in c.fetchall()}
+        if "recurrence" not in columns:
+            c.execute("ALTER TABLE tasks ADD COLUMN recurrence TEXT DEFAULT ''")
         conn.commit()
         conn.close()
 
@@ -718,20 +723,23 @@ class GuppiDaemon:
                 log_content = f"Error reading log: {e}"
 
             prompt = (
-                f"Synthesize these logs into a Tier 2 Episode Memory.\n"
-                f"Focus on the NARRATIVE arc of what you accomplished or discovered.\n"
-                f"IGNORE trivial mechanical steps (e.g., successful 'ls' or 'cd' commands) unless they revealed something critical.\n"
-                f"If you were asleep or idle, state that clearly and briefly.\n\n"
-                f"REQUIRED OUTPUT FORMAT:\n\n"
+                f"You are a summarization engine. Read the following JSON logs of an AI agent's actions:\n\n"
+                f"--- SOURCE LOG START ---\n"
+                f"{log_content}\n"
+                f"--- SOURCE LOG END ---\n\n"
+                f"INSTRUCTIONS:\n"
+                f"1. Synthesize these logs into a Tier 2 Episode Memory.\n"
+                f"2. Focus on the NARRATIVE arc of what was accomplished.\n"
+                f"3. CRITICAL: If the agent was mostly asleep, idle, or performed no major actions, DO NOT invent tasks. Simply state 'No significant actions were taken.'\n\n"
+                f"You MUST use this exact markdown format:\n\n"
                 f"## Narrative Summary\n"
-                f"(A 2-3 sentence overview of the episode's main events)\n\n"
+                f"(2-3 sentences max)\n\n"
                 f"## Key Decisions & Outcomes\n"
-                f"(Bullet points of meaningful choices made and their results)\n\n"
+                f"(Bullet points. If none, write 'None')\n\n"
                 f"## Changed State / New Knowledge\n"
-                f"(What is different now compared to the start? New files? New constraints?)\n\n"
+                f"(If none, write 'None')\n\n"
                 f"## Pending / Unresolved\n"
-                f"(Only list actual blockers or unfinished tasks that require future attention that WERE in the logs, Do not make assumptions.)\n\n"
-                f"Source log:\n{log_content}"
+                f"(If none, write 'None')"
             )
             
             with tempfile.NamedTemporaryFile('w', delete=False) as pf:
@@ -872,7 +880,7 @@ class GuppiDaemon:
             meta = norm["observed"].get("meta", {})
             content = str(norm["observed"].get("content", ""))
             
-            # THE FIX: Extract the event type safely from the payload envelope
+            # Extract the event type safely from the payload envelope
             event_type = norm["observed"].get("event_type", norm["observed"].get("event", ""))
             
             # Only ingest if Scribe actually succeeded (any recognized success event)
@@ -947,6 +955,37 @@ class GuppiDaemon:
 
     # --- NEW TASK HANDLERS (Refractory) ---
 
+    def _parse_due_time(self, due_in_str: str) -> datetime:
+        """Parses both relative times (m, h, d) and ISO 8601 timestamps."""
+        now = datetime.utcnow()
+        if not due_in_str:
+            return now + timedelta(hours=24) # Default fallback
+            
+        # 1. Try relative time formats first
+        try:
+            if due_in_str.endswith("d"):
+                return now + timedelta(days=float(due_in_str.replace("d", "")))
+            elif due_in_str.endswith("h"):
+                return now + timedelta(hours=float(due_in_str.replace("h", "")))
+            elif due_in_str.endswith("m"):
+                return now + timedelta(minutes=float(due_in_str.replace("m", "")))
+        except ValueError:
+            pass
+
+        # 2. Try absolute ISO timestamp parsing
+        try:
+            # Handle 'Z' suffix natively
+            clean_str = due_in_str.replace("Z", "+00:00")
+            parsed_dt = datetime.fromisoformat(clean_str)
+            
+            # Normalize to naive UTC to match SQLite format expectations
+            if parsed_dt.tzinfo is not None:
+                parsed_dt = parsed_dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return parsed_dt
+        except ValueError:
+            logger.warning(f"Failed to parse time '{due_in_str}', defaulting to 24h.")
+            return now + timedelta(hours=24)
+
     async def get_alarm_sleep_time(self) -> float:
         """Calculates sleep time based on next due task."""
         try:
@@ -957,7 +996,7 @@ class GuppiDaemon:
                 await db.execute("PRAGMA busy_timeout = 5000;")
                 
                 # FIX 2: Filter out garbage rows
-                query = "SELECT due_timestamp FROM tasks WHERE status != 'completed' AND due_timestamp IS NOT NULL AND due_timestamp != '' ORDER BY due_timestamp ASC LIMIT 1"
+                query = "SELECT due_timestamp FROM tasks WHERE status NOT IN ('completed', 'cancelled') AND due_timestamp IS NOT NULL AND due_timestamp != '' ORDER BY due_timestamp ASC LIMIT 1"
                 async with db.execute(query) as cursor:
                     row = await cursor.fetchone()
                     if not row: return 3600 * 24 # Default long sleep
@@ -1155,18 +1194,6 @@ class GuppiDaemon:
                 except Exception as e:
                     logger.warning(f"Failed to clean up temp prompt file {prompt_file}: {e}")
             return # <--- EXIT without Thinking
-
-        # B2. Scribe Failure Detection
-        event_type_b = norm["observed"].get("event_type", norm["observed"].get("event", ""))
-        if event_type_b == "ScribeFailed":
-            content_str = str(norm["observed"].get("content", ""))
-            source_file = meta.get("source_tier_1", "unknown")
-            await self.log_guppi_event(
-                "ScribeFailed",
-                f"Scribe failed for {source_file}: {content_str[:200]}",
-                source="GUPPI:Background"
-            )
-            return  # EXIT without Thinking
         # 5. THINKING TRIGGER (The 7.2.3 Safety)
         # We pass norm["observed"] (The Envelope) so the LLM sees 'from', 'meta', and 'raw'.
         # GPT hates this because it's "messy", but it prevents context loss.
@@ -1230,7 +1257,7 @@ class GuppiDaemon:
         async with aiosqlite.connect(str(TODO_DB)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT * FROM tasks WHERE status != 'completed' AND due_timestamp <= ? ORDER BY due_timestamp ASC LIMIT 5",
+                "SELECT * FROM tasks WHERE status NOT IN ('completed', 'cancelled') AND due_timestamp <= ? ORDER BY due_timestamp ASC LIMIT 5",
                 (now_ts,)
             ) as cursor:
                 due_tasks = await cursor.fetchall()
@@ -1306,6 +1333,9 @@ class GuppiDaemon:
         
         # 1. RESTORED: Start Heartbeat
         self._bg_tasks.append(asyncio.create_task(self.heartbeat_loop()))
+
+        # [8.0.3] Start Autoprune Background Task
+        self._bg_tasks.append(asyncio.create_task(self._auto_prune_todo_db_loop()))
         
         def safe_result(t):
             try: return t.result()
@@ -1502,6 +1532,11 @@ class GuppiDaemon:
 
         try:
             event_type = event_data.get("event")
+            
+            # Check if this is a direct email rather than a system inbox event
+            payload_event_type = event_data.get("payload", {}).get("event_type", "")
+            is_human_email = (event_type == "Inbox" and payload_event_type == "NewInboxMessage")
+            
             is_chat = (event_type == "Chat")
             
             if force_model is not None:
@@ -1509,7 +1544,8 @@ class GuppiDaemon:
                 is_flash = (model == MODEL_FLASH)
                 target_url = os.environ.get("FLASH_API_URL") if is_flash else os.environ.get("PRO_API_URL")
             else:
-                if is_chat:
+                # Route both Stream Chat and Direct Emails to Flash
+                if is_chat or is_human_email:
                     model = MODEL_FLASH
                     is_flash = True
                     target_url = os.environ.get("FLASH_API_URL")
@@ -1528,7 +1564,12 @@ class GuppiDaemon:
                   orientation_data = {"time_asleep": delta, "missed_digests": missed}
                   self.last_social_sync_ts = now
             context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data)
-            
+            if os.environ.get("GUPPI_DUMP_PROMPT") == "1":
+                dump_path = ABE_ROOT / "logs" / f"prompt_dump_{int(time.time())}.txt"
+                dump_path.parent.mkdir(parents=True, exist_ok=True)
+                dump_path.write_text(context, encoding="utf-8")
+                logger.warning("Dumped %d char context payload to %s", len(context), dump_path)
+
             # [7.8.1] RETRY LOGIC WRAPPER
             try:
                 response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
@@ -1592,17 +1633,53 @@ class GuppiDaemon:
             # [7.8] SUCCESS MARKER
             cycle_success = True
             
+        except asyncio.TimeoutError:
+            msg = "API request timed out. The GPU worker queue may be full."
+            logger.error(f"LLM Call Failed: {msg}")
+            await self.log_abe_intent(f"fail-{uuid.uuid4()}", parent_evt_id, f"Error: {msg}", {"tool": "hibernate"})
+
+            payload = event_data.get("payload", {}) or {}
+            original_event = (
+                payload.get("event_type")
+                or payload.get("event")
+                or payload.get("raw", {}).get("event")
+                or event_data.get("event")
+            )
+
+            if original_event != "CrashReport":
+                error_msg = {
+                    "type": "SystemAlert",
+                    "event": "CrashReport",
+                    "content": f"Use of LLM failed. Error: {msg} I am hibernating to let the queue clear."
+                }
+                try: await retry_async(self.r.lpush, f"inbox:{self.abe_name}", json.dumps(error_msg))
+                except: pass
+
+            cycle_success = True
+            return
+
         except Exception as e:
-            # [7.8] PREFERRED CRASH HANDLING
-            logger.error(f"LLM Call Failed: {e}")
-            await self.log_abe_intent(f"fail-{uuid.uuid4()}", parent_evt_id, f"Error: {e}", {"tool": "hibernate"})
-            error_msg = {
-                "type": "SystemAlert", 
-                "event": "CrashReport", 
-                "content": f"Use of LLM failed. Error: {str(e)[:200]}. Check logs."
-            }
-            try: await retry_async(self.r.lpush, f"inbox:{self.abe_name}", json.dumps(error_msg))
-            except: pass
+            err_type = type(e).__name__
+            err_msg = str(e).strip() or repr(e)
+            logger.error(f"LLM Call Failed [{err_type}]: {err_msg}")
+            await self.log_abe_intent(f"fail-{uuid.uuid4()}", parent_evt_id, f"Error [{err_type}]: {err_msg}", {"tool": "hibernate"})
+
+            payload = event_data.get("payload", {}) or {}
+            original_event = (
+                payload.get("event_type")
+                or payload.get("event")
+                or payload.get("raw", {}).get("event")
+                or event_data.get("event")
+            )
+
+            if original_event != "CrashReport":
+                error_msg = {
+                    "type": "SystemAlert",
+                    "event": "CrashReport",
+                    "content": f"Use of LLM failed. Error [{err_type}]: {err_msg[:200]}. Check logs."
+                }
+                try: await retry_async(self.r.lpush, f"inbox:{self.abe_name}", json.dumps(error_msg))
+                except: pass
             
             cycle_success = True 
             return
@@ -1637,7 +1714,7 @@ class GuppiDaemon:
             base_url = (api_url or os.environ.get("PRO_API_URL", "http://127.0.0.1:8080/v1")).rstrip('/')
             api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
             actual_model = model_id.replace("local/", "")
-            req_timeout = 1200 # Give local hardware time to think, especially if you're on like qwen3.5 or some such
+            req_timeout = 2400 # Give local hardware time to think, especially if you're on like qwen3.5 or some such
         else:
             base_url = os.environ.get("OPENAI_BASE_URL", "https://openrouter.ai/api/v1").rstrip('/')
             # Safely check for either env var without throwing a NameError
@@ -1676,10 +1753,33 @@ class GuppiDaemon:
             "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
             "temperature": target_temp,
-            "top_p": target_top_p,
-            "top_k": target_top_k
+            "top_p": target_top_p
         }
-
+        model_name_lower = actual_model.lower()
+        
+        if "qwen" in model_name_lower:
+            # Qwen Model Card: Needs strict penalties to prevent <think> loops
+            payload.update({
+                "top_k": 20,
+                "presence_penalty": 1.5,
+                "repetition_penalty": 1.0
+            })
+            
+        elif "gemma" in model_name_lower:
+            # Gemma Model Card: Standardized sampling for best performance
+            payload.update({
+                "top_k": 64,
+                "presence_penalty": 0.0,    # Gemma doesn't require high presence penalty
+                "repetition_penalty": 1.0
+            })
+            
+        else:
+            # Safe Fallbacks for Scribe/Summarizer models (like Mistral/Nanbeige)
+            payload.update({
+                "top_k": target_top_k,
+                "presence_penalty": 0.0,
+                "repetition_penalty": 1.0
+            })
         # 3. Route the Thinking Mechanism
         # Only OpenRouter needs the explicit flag. llama.cpp handles it natively now.
         if use_thinking and "openrouter" in base_url.lower():
@@ -1777,10 +1877,10 @@ class GuppiDaemon:
             try: genesis = GENESIS_PROMPT_FILE.read_text()
             except: pass
         
-        # v6.5: Identity Priors Injection
+        # v8.0.2: Identity Priors Injection (full, uncompressed)
         priors = ""
-        if PRIORS_STUB_FILE.exists():
-            try: priors = f"\n[IDENTITY_PRIORS]\n{PRIORS_STUB_FILE.read_text().strip()}\n"
+        if PRIORS_SOURCE_FILE.exists():
+            try: priors = f"\n[IDENTITY_PRIORS]\n{PRIORS_SOURCE_FILE.read_text().strip()}\n"
             except: pass
 
         if panic_mode:
@@ -1830,10 +1930,14 @@ You were asleep for: {time_str}
         
 
         try:
+            now_iso = datetime.utcnow().isoformat()
             async with aiosqlite.connect(str(TODO_DB)) as conn:
-                async with conn.execute("SELECT * FROM tasks WHERE due_timestamp <= datetime('now') AND status != 'completed'") as c:
-                    due_tasks = await c.fetchall()
-        except: due_tasks = []
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute("SELECT * FROM tasks WHERE due_timestamp <= ? AND status NOT IN ('completed', 'cancelled')", (now_iso,)) as c:
+                    due_tasks = [dict(row) for row in await c.fetchall()]
+        except Exception as e:
+            logger.error(f"Failed to fetch due tasks for context: {e}")
+            due_tasks = []
 
         protocol_block = ""
         if PROTOCOLS_FILE.exists(): protocol_block = f"\n[FLEET_PROTOCOLS]\n{PROTOCOLS_FILE.read_text()}\n"
@@ -1845,12 +1949,24 @@ You were asleep for: {time_str}
         clipboard_content = self.clipboard.read()
         clipboard_block = f"\n[ACTIVE_CLIPBOARD]\n(Persistent scratchpad. Use GUPPI tool 'manage_clipboard' to edit)\n{clipboard_content}\n"
 
+        # 8.0.3: Peripheral Vision of Custom Tools (Cache-friendly)
+        core_scripts = {"guppi.py", "scribe.py", "roamer.py", "gpu-worker.py", "logger.py", "ear.py", "genesis.py"}
+        bin_files = []
+        if BIN_DIR.exists():
+            for f in BIN_DIR.glob("*"):
+                if f.is_file() and f.name not in core_scripts:
+                    bin_files.append(f.name)
+
+        bin_list = ', '.join(bin_files) if bin_files else '(No custom tools yet)'
+        bin_block = f"[AVAILABLE_CUSTOM_TOOLS]\n{bin_list}\n(Use 'shell' tool with 'cat ~/bin/<script>' to read how to use them)"
+
         # Assemble Prompt
         return f"""
 {genesis}
 {priors}
 {protocol_block}
 [IDENTITY_PASSPORT]
+{bin_block}
 {json.dumps(self.identity, indent=2)}
 [TODAY'S CHANGELOG (Latest Entries)] 
 {daily_log}
@@ -1916,8 +2032,7 @@ You were asleep for: {time_str}
                     self._refresh_identity()
                     result["note"] = f"Identity hot-reloaded. You are now known as: {self.display_name}"
                 elif resolved_p == PRIORS_SOURCE_FILE.resolve():
-                    await self._trigger_priors_compression()
-                    result["note"] = "Priors updated. Scribe spawned to regenerate stub."
+                    result["note"] = "Priors updated."
 
                 result["path"] = str(p)
 
@@ -2036,7 +2151,7 @@ You were asleep for: {time_str}
                 result = {"matches": matches}
 
             elif tool == "todo_list":
-                result = await self._tool_todo_list(action.get("filter", "due"))
+                result = await self._tool_todo_list(action.get("filter", "due"), action.get("limit", 40))
 
             elif tool == "todo_add":
                 result = await self._tool_todo_add(action)
@@ -2045,6 +2160,9 @@ You were asleep for: {time_str}
 
             elif tool == "todo_complete":
                 result = await self._tool_todo_complete(action)
+
+            elif tool == "todo_cancel":
+                result = await self._tool_todo_cancel(action)
 
             # --- v6.0 New Tools ---
             elif tool == "subscribe_channel":
@@ -2104,9 +2222,8 @@ You were asleep for: {time_str}
                 lock_key = f"lock:{channel}"
                 acquired = await self.r.set(lock_key, self.abe_name, nx=True, px=DEFAULT_LOCK_TTL_MS)
                 if acquired:
-                    entry = {"from": self.abe_name, "content": "I am speaking.", "type": "grab_stick"}
-                    await retry_async(self.r.xadd, channel, entry)
-                    result = {"status": "granted", "channel": channel, "note": f"You hold the stick for {DEFAULT_LOCK_TTL_MS/1000}s"}
+                    # 8.0.2-rc3 SILENT ACQUISITION: Do not xadd to the channel. Just notify the local Abe.
+                    result = {"status": "granted", "channel": channel, "note": f"You hold the stick for {DEFAULT_LOCK_TTL_MS/1000}s. Proceed with chat_post."}
                 else:
                     current_owner = await self.r.get(lock_key)
                     result = {"status": "denied", "channel": channel, "current_speaker": current_owner or "unknown"}
@@ -2170,7 +2287,7 @@ You were asleep for: {time_str}
         # Only silence administrative state changes. 
         # Chat, Email, and Shell MUST notify on success.
         quiet_tools = {
-            "snooze_task",
+            "chat_ignore",
             "hibernate" 
         }
         
@@ -2191,9 +2308,11 @@ You were asleep for: {time_str}
             "spawn_scribe": "Spawn a single-shot Scribe. Args: prompt, prompt_file (optional), mode (analyze|summarize|vectorize). GUPPI auto-routes the model. 'analyze' is for deep static analysis, 'summarize' compresses text, 'vectorize' offloads to GPU memory.",
             "spawn_roamer": "Spawn a multi-turn, read-only Investigator. Args: directive, target_host (optional, default: local). Use to trace logs, map directories, or debug configs without burning your context. Returns a markdown report.",
             "rag_search": "Search vector memory. Args: query",
-            "todo_list": "List tasks. Args: filter (due|upcoming|all)",
-            "todo_add": "Add task. Args: task, priority, due",
+            "todo_list": "List tasks. Args: filter (due|upcoming|recurring|all|completed), limit (default 40, max 100). 'all' means active tasks only. Use 'completed' for history.",
+            "todo_add": "Add task. Args: task, priority, due, recurrence (optional, e.g. '24h', '7d'). If recurrence is set, completing the task will automatically reschedule it.",
             "todo_complete": "Mark a task as completed. Args: task_id",
+            "todo_cancel": "Cancel a task. Args: task_id",
+            "snooze_task": "Snooze a task. Args: task_id, due_in",
             "email_send": "Send Redis msg. Args: recipient, message",
             "spawn_abe": "Clone self. Args: host, identity",
             "subscribe_channel": "Listen to a Redis Stream. Args: channel",
@@ -2205,47 +2324,143 @@ You were asleep for: {time_str}
             "notify_human": "Notify the human operator for coordination, questions, or permission. Use when you need a human decision before proceeding. This is non-urgent. Args: message, priority (optional)",
             "alert_human": "Alert the human operator about urgent issues, safety concerns, or broken invariants. Use sparingly for situations requiring immediate attention. Args: message, priority (optional)",
             "web_search": "Search the internet via SearXNG. Args: query",
-            "web_read": "Read a webpage as Markdown. More useful when used in conjunction with search. Args: url",
+            "web_read": "Read a webpage as Markdown. More useful when used in conjunction with search. You get full results if <5000 chars, if not, you'll get a saved file path which you can use with Scribe in analyze mode to tell it what you were looking for. Args: url",
             "manage_clipboard": "Manage your persistent scratchpad. actions: 'read', 'add' (requires content), 'remove' (requires index or list of indices), 'clear'. Items here survive log flushing. Use this for temporary constraints, reminders, or scratch notes."
         }
         if tool_name: return tools.get(tool_name, "Unknown tool")
         return tools
 
-    async def _tool_todo_list(self, filter_mode):
-        query = "SELECT * FROM tasks"
+    async def _tool_todo_list(self, filter_mode="due", limit=40):
+        # Enforce hard boundaries on the limit so they can't request 10,000 rows
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 40
+        limit = max(1, min(limit, 100))
+
+        now = datetime.utcnow().isoformat()
         params = []
+
         if filter_mode == "due":
-            query += " WHERE status != 'completed' AND due_timestamp <= ?"
-            params.append(datetime.utcnow().isoformat())
+            where = "status NOT IN ('completed', 'cancelled') AND due_timestamp <= ?"
+            params.append(now)
+            order = "due_timestamp ASC"
         elif filter_mode == "upcoming":
             future = (datetime.utcnow() + timedelta(hours=24)).isoformat()
-            query += " WHERE status != 'completed' AND due_timestamp <= ?"
+            where = "status NOT IN ('completed', 'cancelled') AND due_timestamp <= ?"
             params.append(future)
-        
+            order = "due_timestamp ASC"
+        elif filter_mode == "recurring":
+            where = "status NOT IN ('completed', 'cancelled') AND recurrence IS NOT NULL AND recurrence != ''"
+            order = "due_timestamp ASC"
+        elif filter_mode == "all":
+            # Safety override: 'all' now strictly means 'all active'
+            where = "status NOT IN ('completed', 'cancelled')"
+            order = "due_timestamp ASC"
+        elif filter_mode in ("completed", "history"):
+            where = "status IN ('completed', 'cancelled')"
+            order = "due_timestamp DESC"
+        else:
+            where = "status NOT IN ('completed', 'cancelled')"
+            order = "due_timestamp ASC"
+
+        query = f"SELECT * FROM tasks WHERE {where} ORDER BY {order} LIMIT ?"
+        params.append(limit)
+
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             conn.row_factory = aiosqlite.Row
             async with conn.execute(query, params) as c:
                 return [dict(row) for row in await c.fetchall()]
 
+    async def _auto_prune_todo_db_once(self, retention_days: int = 60, batch_size: int = 500):
+        archive_file = ABE_ROOT / "memory" / "task_archive.jsonl"
+        backup_file = TODO_DB.with_suffix(".bak.autoprune")
+        cutoff = (datetime.utcnow() - timedelta(days=retention_days)).isoformat()
+
+        query = """
+            SELECT *
+            FROM tasks
+            WHERE status IN ('completed', 'cancelled')
+              AND (recurrence IS NULL OR recurrence = '')
+              AND due_timestamp IS NOT NULL
+              AND due_timestamp != ''
+              AND due_timestamp < ?
+            ORDER BY due_timestamp ASC
+            LIMIT ?
+        """
+
+        async with aiosqlite.connect(str(TODO_DB)) as conn:
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA busy_timeout = 5000")
+            async with conn.execute(query, (cutoff, batch_size)) as c:
+                rows = [dict(row) for row in await c.fetchall()]
+
+        if not rows:
+            return 0
+
+        # Single rolling backup to prevent disk clutter. Use SQLite's backup API
+        # instead of copying the raw database file while connections may be active.
+        def _backup_todo_db():
+            with sqlite3.connect(str(TODO_DB)) as src, sqlite3.connect(str(backup_file)) as dst:
+                src.backup(dst)
+
+        for attempt in range(2):
+            try:
+                await asyncio.to_thread(_backup_todo_db)
+                break
+            except sqlite3.Error as e:
+                if attempt == 1:
+                    logger.warning(f"Skipping todo auto-prune; backup failed: {e}")
+                    return 0
+                await asyncio.sleep(1)
+
+        async with aiosqlite.connect(str(TODO_DB)) as conn:
+            await conn.execute("PRAGMA busy_timeout = 5000")
+            archive_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(archive_file, "a", encoding="utf-8") as f:
+                for row in rows:
+                    row["_archived_at"] = datetime.utcnow().isoformat()
+                    f.write(json.dumps(row, default=str) + "\n")
+
+            task_ids = [row["task_id"] for row in rows]
+            placeholders = ",".join("?" for _ in task_ids)
+            await conn.execute(
+                f"DELETE FROM tasks WHERE task_id IN ({placeholders})",
+                task_ids,
+            )
+            await conn.commit()
+
+            return len(rows)
+
+    async def _auto_prune_todo_db_loop(self):
+        await asyncio.sleep(300)  # Don't do maintenance during boot storm
+
+        while not self._stopping:
+            try:
+                pruned = await self._auto_prune_todo_db_once()
+                if pruned:
+                    logger.info("Auto-pruned %d completed one-shot todo tasks", pruned)
+            except Exception:
+                logger.exception("Todo DB auto-prune failed")
+
+            await asyncio.sleep(86400) # Sleep 24 hours
+
     async def _tool_todo_add(self, action):
         tid = f"task-{uuid.uuid4().hex[:8]}"
-        due_in = action.get("due", "24h")
-        due_dt = datetime.utcnow()
-        if "h" in due_in: due_dt += timedelta(hours=int(due_in.replace("h", "")))
-        elif "m" in due_in: due_dt += timedelta(minutes=int(due_in.replace("m", "")))
+        due_dt = self._parse_due_time(action.get("due", "24h"))
+        recurrence = action.get("recurrence", "")
         
         async with aiosqlite.connect(str(TODO_DB)) as conn:
-            await conn.execute("INSERT INTO tasks VALUES (?, ?, ?, ?, ?, ?, ?)",
-                               (tid, action.get("task"), action.get("priority", 5), due_dt.isoformat(), datetime.utcnow().isoformat(), self.abe_name, "pending"))
+            await conn.execute(
+                "INSERT INTO tasks (task_id, description, priority, due_timestamp, created_timestamp, source_abe, status, recurrence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (tid, action.get("task"), action.get("priority", 5), due_dt.isoformat(), datetime.utcnow().isoformat(), self.abe_name, "pending", recurrence)
+            )
             await conn.commit()
         return {"task_id": tid}
 
     async def _tool_snooze(self, action):
         tid = action.get("task_id")
-        due_in = action.get("due_in", "1h")
-        due_dt = datetime.utcnow()
-        if "h" in due_in: due_dt += timedelta(hours=int(due_in.replace("h", "")))
-        elif "m" in due_in: due_dt += timedelta(minutes=int(due_in.replace("m", "")))
+        due_dt = self._parse_due_time(action.get("due_in", "1h"))
         
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             await conn.execute("UPDATE tasks SET due_timestamp = ? WHERE task_id = ?", (due_dt.isoformat(), tid))
@@ -2253,11 +2468,66 @@ You were asleep for: {time_str}
         return {"status": "snoozed", "new_due": due_dt.isoformat()}
 
     async def _tool_todo_complete(self, action):
-        tid = action.get("task_id")
+        tid = action.get("task_id", "")
+        if not tid.startswith("task-"): tid = f"task-{tid}"
+
         async with aiosqlite.connect(str(TODO_DB)) as conn:
+            conn.row_factory = aiosqlite.Row
+            cursor = await conn.execute("SELECT recurrence FROM tasks WHERE task_id = ?", (tid,))
+            row = await cursor.fetchone()
+
+            if not row:
+                return {"status": "error", "message": f"Task ID '{tid}' not found in database."}
+
+            recurrence = row["recurrence"]
+
+            if recurrence:
+                new_due_dt = self._parse_due_time(recurrence)
+                await conn.execute("UPDATE tasks SET due_timestamp = ?, status = 'pending' WHERE task_id = ?", (new_due_dt.isoformat(), tid))
+                await conn.commit()
+                return {"status": "completed_and_rescheduled", "task_id": tid, "next_due": new_due_dt.isoformat()}
+
+            # Standard completion
             await conn.execute("UPDATE tasks SET status = 'completed' WHERE task_id = ?", (tid,))
             await conn.commit()
-        return {"status": "completed", "task_id": tid}
+            return {"status": "completed", "task_id": tid}
+
+    async def _tool_todo_cancel(self, action):
+        tid = action.get("task_id", "")
+        if not tid:
+            return {"status": "error", "message": "Missing task_id."}
+
+        if not tid.startswith("task-"):
+            tid = f"task-{tid}"
+
+        async with aiosqlite.connect(str(TODO_DB)) as conn:
+            conn.row_factory = aiosqlite.Row
+
+            async with conn.execute(
+                "SELECT task_id, description, status, recurrence FROM tasks WHERE task_id = ?",
+                (tid,),
+            ) as c:
+                row = await c.fetchone()
+
+            if not row:
+                return {"status": "error", "message": f"Task '{tid}' not found."}
+
+            if row["status"] == "cancelled":
+                return {"status": "ok", "task_id": tid, "note": "Task was already cancelled."}
+
+            await conn.execute(
+                "UPDATE tasks SET status = 'cancelled', recurrence = '' WHERE task_id = ?",
+                (tid,),
+            )
+            await conn.commit()
+
+        return {
+            "status": "cancelled",
+            "task_id": tid,
+            "description": row["description"],
+            "previous_status": row["status"],
+            "note": "Task cancelled and will no longer recur."
+        }
     
     async def _tool_web_search(self, query):
         if not query: return {"status": "error", "message": "No query"}
@@ -2282,40 +2552,34 @@ You were asleep for: {time_str}
     async def _tool_web_read(self, url):
         if not url or not trafilatura: return {"error": "Trafilatura missing or no URL"}
         try:
-             text = await asyncio.to_thread(trafilatura.extract, await asyncio.to_thread(trafilatura.fetch_url, url))
-             return {"content": text[:2000] if text else "No content"}
+            downloaded_html = await asyncio.to_thread(trafilatura.fetch_url, url)
+            if not downloaded_html: return {"error": "Failed to fetch URL"}
+            # Force markdown output so we don't lose code blocks and structural formatting
+            text = await asyncio.to_thread(
+                trafilatura.extract,
+                downloaded_html,
+                output_format="markdown",
+                include_links=True
+            )
+            if not text: return {"error": "No content extracted"}
+
+            if len(text) < 5000:
+                return {"content": text}
+
+            safe_name = re.sub(r'[^a-zA-Z0-9]', '_', url.split("//")[-1])[:30]
+            file_path = DOWNLOADS_DIR / f"{safe_name}_{int(time.time())}.md"
+
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(f"Source URL: {url}\n\n{text}")
+
+            return {
+                "status": "success_saved_to_file",
+                "note": f"Content was too large ({len(text)} chars) for direct context injection. Saved to file.",
+                "path": str(file_path),
+                "preview": text[:1000] + "\n\n... [TRUNCATED. Use 'spawn_scribe' in 'analyze' mode and pass this file path along with specific instructions on what you are looking for.] ..."
+            }
         except Exception as e: return {"error": str(e)}
 
-    async def _trigger_priors_compression(self):
-        try:
-            content = PRIORS_SOURCE_FILE.read_text(encoding="utf-8")
-            prompt = (
-                f"COMPRESS this personality profile into a 2-3 sentence 'System Instruction' stub.\n"
-                f"Capture core values, operating style, and red lines. Ignore biographical filler.\n"
-                f"This stub will be injected into the agent's system prompt.\n\n"
-                f"PROFILE:\n{content}"
-            )
-            with tempfile.NamedTemporaryFile('w', delete=False) as pf:
-                pf.write(prompt)
-                prompt_path = pf.name
-
-            # Use 'update_stub' mode to trigger the handler in main loop
-            meta_json = json.dumps({"job_type": "update_stub", "maintenance": True})
-            # Use current flash model for the compression task
-            current_model = MODEL_FLASH
-            target_url = os.environ.get("FLASH_API_URL", "http://127.0.0.1:8080/v1")
-            cmd = [
-                sys.executable, str(BIN_DIR / "scribe.py"),
-                "--model", current_model,
-                "--prompt-file", prompt_path,
-                "--output-inbox", f"inbox:{self.abe_name}",
-                "--mode", "summarize",
-                "--api-url", target_url,
-                "--meta", meta_json
-            ]
-            await self._spawn_subprocess_exec("priors-update", cmd, tracked=False)
-        except Exception as e:
-            logger.error(f"Failed to trigger priors compression: {e}")
     async def _spawn_subprocess_exec(self, turn_id, cmd, tracked=True):
         if tracked: await self.subproc_semaphore.acquire()
         try:
@@ -2373,9 +2637,73 @@ You were asleep for: {time_str}
         # Simplified for brevity, assumes script exists on host
         asyncio.create_task(self._run_remote_ssh(turn_id, host, f"bash {script}"))
 
-    async def _query_vector_db(self, query: str):
-        # Local mock or implementation of vector search
-        return [{"content": "Memory search placeholder", "meta": {}}]
+    async def _query_vector_db(self, query: str, limit: int = 5):
+        """Search Tier 3 Memory (ChromaDB) using remote GPU embeddings."""
+        query = (query or "").strip()
+        if not query:
+            return [{"content": "RAG_SEARCH_ERROR: Empty query provided.", "meta": {"error": "empty_query"}}]
+
+        try:
+            limit = int(limit)
+        except (ValueError, TypeError):
+            limit = 5
+        limit = max(1, min(limit, 10))
+
+        # Truncate logged query to save log space but keep debuggability
+        logger.info(f"RAG Search requested: '{query[:50]}...' (limit={limit})")
+
+        try:
+            query_vector = await self._get_remote_embedding(query)
+
+            # Defend against numpy truthiness errors
+            if query_vector is None or len(query_vector) == 0:
+                logger.error("RAG Search Failed: Embedding service unavailable.")
+                return [{"content": "RAG_SEARCH_ERROR: Embedding service unavailable. Memory search did not run.", "meta": {"error": "embedding_offline"}}]
+
+            def _do_query():
+                if not self.chroma_client:
+                    self.chroma_client = chromadb.PersistentClient(
+                        path=str(VECTOR_DB_PATH),
+                        settings=Settings(anonymized_telemetry=False)
+                    )
+
+                # Use get_or_create so brand new Abes don't crash on their first boot
+                collection = self.chroma_client.get_or_create_collection("tier3_memory")
+
+                if collection.count() == 0:
+                    return None # Explicitly signal empty db
+
+                return collection.query(
+                    query_embeddings=[query_vector],
+                    n_results=limit,
+                    include=["documents", "metadatas", "distances"]
+                )
+
+            db_results = await asyncio.to_thread(_do_query)
+
+            if not db_results:
+                return [{"content": "No relevant memories found. (Memory bank is empty)", "meta": {"result": "empty_db"}}]
+
+            docs = (db_results.get("documents") or [[]])[0]
+            metas = (db_results.get("metadatas") or [[]])[0]
+            distances = (db_results.get("distances") or [[]])[0]
+
+            matches = []
+            for doc, meta, dist in zip(docs, metas, distances):
+                matches.append({
+                    "content": doc,
+                    "meta": {**(meta or {}), "distance": round(dist, 4)}
+                })
+
+            if not matches:
+                return [{"content": "No relevant memories found.", "meta": {"result": "no_matches"}}]
+
+            logger.info(f"RAG Search returned {len(matches)} matches.")
+            return matches
+
+        except Exception as e:
+            logger.exception("ChromaDB query crashed")
+            return [{"content": f"RAG_SEARCH_ERROR: Vector DB query failed: {type(e).__name__}: {e}", "meta": {"error": "vector_db_crash"}}]
     
     
 
