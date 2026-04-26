@@ -10,6 +10,7 @@ import json
 import os
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import List
 
 import redis.asyncio as redis
@@ -24,10 +25,12 @@ REDIS_HOST = os.environ.get("REDIS_HOST")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "volition")
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
+DASHBOARD_DIR = Path(__file__).resolve().parent
+TEMPLATE_DIR = DASHBOARD_DIR / "templates"
 
 # --- APP SETUP ---
 app = FastAPI(title="Volition Command")
-templates = Jinja2Templates(directory="templates")
+templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 # --- ROUTES ---
 
@@ -127,7 +130,8 @@ class ConnectionManager:
         self.active_connections.append(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
 
     async def broadcast(self, message: dict):
         payload = json.dumps(message)
@@ -138,9 +142,8 @@ class ConnectionManager:
             except:
                 dead.append(connection)
 
-        for d in dead:
-            self.active_connections.remove(d)
-
+        for connection in dead:
+            self.disconnect(connection)
 
 manager = ConnectionManager()
 
@@ -158,11 +161,12 @@ async def redis_listener():
 
     last_scan = 0
     print("👂 Volition Backend Listening...")
-
     backoff = 1
 
     while True:
         try:
+            await rm.connect()
+
             # DYNAMIC CHANNEL DISCOVERY
             if time.time() - last_scan > 5:
                 found_channels = await rm.scan_channels()
@@ -189,6 +193,7 @@ async def redis_listener():
             backoff = 1
         except Exception as e:
             print(f"Redis Loop Error: {e}")
+            rm.redis = None
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, 30)
 
@@ -239,7 +244,9 @@ async def websocket_endpoint(websocket: WebSocket):
             hist = await rm.redis.xrevrange("volition:action_log", count=2000)
             
             count = 0
-            email_count = 0 
+            email_count = 0
+            error_count = 0
+            error_statuses = {"error", "failed", "self_correcting", "interrupted"}
             
             for msg_id, data in hist:
                 should_send = False
@@ -248,14 +255,26 @@ async def websocket_endpoint(websocket: WebSocket):
                 if count < 100:
                     should_send = True
                 
-                # Rule 2: Deep search for emails (Limit to last 15 found)
-                elif email_count < 15: 
+                # Rule 2: Deep search for operator-relevant emails and incidents.
+                elif email_count < 45 or error_count < 100:
                     try:
                         entry = json.loads(data.get("entry", "{}"))
                         tool = entry.get("action", {}).get("tool")
-                        if tool == "email_send":
+                        results = entry.get("results", {}) if isinstance(entry.get("results"), dict) else {}
+                        reasoning = entry.get("reasoning", "")
+                        is_error = (
+                            entry.get("status") in error_statuses
+                            or results.get("status") in {"error", "failed"}
+                            or bool(results.get("error"))
+                            or (isinstance(reasoning, str) and reasoning.startswith("Error:"))
+                        )
+
+                        if tool == "email_send" and email_count < 45:
                             should_send = True
                             email_count += 1
+                        elif is_error and error_count < 100:
+                            should_send = True
+                            error_count += 1
                     except: pass
 
                 if should_send:
@@ -332,4 +351,3 @@ if __name__ == "__main__":
         reload=False,
         access_log=False,
     )
-

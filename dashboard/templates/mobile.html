@@ -6,7 +6,7 @@
       name="viewport" 
       content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" 
     />
-    <title>Volition Mobile</title>
+    <title>Volition</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
       tailwind.config = {
@@ -28,6 +28,21 @@
     <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
     <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
+      :root {
+        --ink: #0c0f0e;
+        --panel: #151713;
+        --panel-2: #1b1e18;
+        --line: #303329;
+        --line-soft: #242820;
+        --text: #ebe4d3;
+        --muted: #8f9487;
+        --faint: #62685d;
+        --brass: #c3a15f;
+        --teal: #7fb7a7;
+        --teal-soft: #132723;
+        --rust: #b98776;
+      }
+
       /* NUCLEAR OPTION for Mobile Layout Stability */
       html, body {
         height: 100%; 
@@ -35,7 +50,9 @@
         margin: 0;
         padding: 0;
         overflow: hidden; /* Prevent body scroll */
-        background-color: #000;
+        background-color: var(--ink);
+        color: var(--text);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         position: fixed; /* Pins layout to viewport, preventing address bar shift issues */
         top: 0;
         left: 0;
@@ -51,10 +68,73 @@
       }
 
       .glass-panel {
-        background: rgba(22, 27, 34, 0.95);
-        border: 1px solid #30363d;
+        background: var(--panel);
+        border: 1px solid var(--line-soft);
         backdrop-filter: blur(10px);
       }
+
+      [class*="bg-black"],
+      [class*="bg-gray-950"],
+      [class*="bg-gray-900"] {
+        background-color: var(--ink) !important;
+      }
+
+      [class*="bg-gray-800"] {
+        background-color: var(--panel) !important;
+      }
+
+      [class*="border-gray-800"],
+      [class*="border-gray-700"],
+      [class*="border-gray-600"] {
+        border-color: var(--line-soft) !important;
+      }
+
+      [class*="text-gray-200"],
+      [class*="text-white"] {
+        color: var(--text) !important;
+      }
+
+      [class*="text-gray-400"],
+      [class*="text-gray-500"],
+      [class*="text-gray-600"] {
+        color: var(--muted) !important;
+      }
+
+      [class*="bg-blue"],
+      [class*="bg-cyan"] {
+        background-color: var(--brass) !important;
+        color: var(--ink) !important;
+      }
+
+      [class*="text-blue"],
+      [class*="text-cyan"] {
+        color: var(--brass) !important;
+      }
+
+      [class*="border-blue"],
+      [class*="border-cyan"] {
+        border-color: rgba(195, 161, 95, 0.55) !important;
+      }
+
+      [class*="bg-green"] {
+        background-color: var(--teal) !important;
+      }
+
+      [class*="bg-red"] {
+        background-color: var(--rust) !important;
+      }
+
+      [class*="text-red"] {
+        color: var(--rust) !important;
+      }
+
+      textarea,
+      input {
+        background-color: #0f1210 !important;
+        border-color: var(--line) !important;
+        color: var(--text) !important;
+      }
+
       .no-scrollbar::-webkit-scrollbar {
         display: none;
       }
@@ -68,14 +148,50 @@
     <div id="root"></div>
 
     <script type="text/babel">
+      {% raw %}
       const { useState, useEffect, useRef, useMemo } = React;
       const formatTime = (iso) => {
         if (!iso) return "??:??";
         try {
-          return iso.split("T")[1].substring(0, 5); 
+          const normalized = iso.endsWith("Z") ? iso : `${iso}Z`;
+          return new Date(normalized).toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: false,
+          });
         } catch {
           return new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
         }
+      };
+      const autoResize = (el) => {
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${el.scrollHeight}px`;
+      };
+      const parseActionEntry = (event) => {
+        try {
+          return JSON.parse(event?.data?.entry || "{}");
+        } catch {
+          return {};
+        }
+      };
+      const isErrorEntry = (entry) => {
+        const status = entry?.status || "";
+        const results = entry?.results || {};
+        const reasoning = entry?.reasoning || "";
+        return (
+          ["error", "failed", "self_correcting", "interrupted"].includes(status)
+          || results.status === "error"
+          || results.status === "failed"
+          || Boolean(results.error)
+          || (typeof reasoning === "string" && reasoning.startsWith("Error:"))
+        );
+      };
+      const getErrorMessage = (entry) => {
+        const results = entry?.results || {};
+        return results.error || results.message || (entry.reasoning?.startsWith("Error:") ? entry.reasoning : "No explicit error message captured.");
       };
 
       const Icons = {
@@ -107,6 +223,7 @@
 
       const MobileChat = ({ channel, messages, onSend, identity }) => {
         const [input, setInput] = useState("");
+        const inputRef = useRef(null);
         const bottomRef = useRef(null);
         
         useEffect(() => {
@@ -118,6 +235,14 @@
           if (!input.trim()) return;
           onSend(channel, input);
           setInput("");
+          requestAnimationFrame(() => autoResize(inputRef.current));
+        };
+
+        const handleKeyDown = (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            handleSubmit(e);
+          }
         };
 
         return (
@@ -146,11 +271,17 @@
              
              <div className="p-2 bg-gray-800 border-t border-gray-700">
                  <form onSubmit={handleSubmit} className="flex gap-2">
-                     <input 
-                        className="flex-1 bg-gray-900 border border-gray-700 rounded-full px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+                     <textarea
+                        ref={inputRef}
+                        rows={1}
+                        className="flex-1 bg-gray-900 border border-gray-700 rounded-2xl px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500 resize-none overflow-y-auto max-h-32"
                         placeholder={`Message #${channel.replace("chat:", "")}...`}
                         value={input}
-                        onChange={e => setInput(e.target.value)}
+                        onChange={e => {
+                          setInput(e.target.value);
+                          autoResize(e.target);
+                        }}
+                        onKeyDown={handleKeyDown}
                      />
                      <button type="submit" className="bg-blue-600 text-white rounded-full p-2.5 flex items-center justify-center">
                         <Icons.Send />
@@ -206,6 +337,7 @@
           const [subTab, setSubTab] = useState("compose"); 
           const [to, setTo] = useState("");
           const [msg, setMsg] = useState("");
+          const msgRef = useRef(null);
 
           const emails = useMemo(() => {
              const candidates = actions
@@ -228,7 +360,15 @@
               if(!to || !msg) return;
               onSendEmail(to, msg);
               setMsg("");
+              requestAnimationFrame(() => autoResize(msgRef.current));
               setSubTab("inbox");
+          };
+
+          const handleMessageKeyDown = (e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend(e);
+              }
           };
 
           return (
@@ -257,7 +397,17 @@
                                </div>
                                <div>
                                    <label className="block text-xs text-gray-500 mb-1">Message</label>
-                                   <textarea value={msg} onChange={e=>setMsg(e.target.value)} className="w-full h-32 bg-gray-900 border border-gray-600 rounded p-2 text-white" placeholder="Direct command..." />
+                                   <textarea
+                                     ref={msgRef}
+                                     value={msg}
+                                     onChange={e=>{
+                                       setMsg(e.target.value);
+                                       autoResize(e.target);
+                                     }}
+                                     onKeyDown={handleMessageKeyDown}
+                                     className="w-full min-h-32 bg-gray-900 border border-gray-600 rounded p-2 text-white resize-none overflow-y-auto max-h-48"
+                                     placeholder="Direct command..."
+                                   />
                                </div>
                                <button onClick={handleSend} className="w-full bg-blue-600 text-white font-bold py-3 rounded hover:bg-blue-500">SEND UPLINK</button>
                            </div>
@@ -328,6 +478,66 @@
           );
       };
 
+      const MobileIncidents = ({ actions }) => {
+          const [filter, setFilter] = useState("");
+          const incidents = useMemo(() => {
+              const needle = filter.toLowerCase();
+              return actions
+                .map((event) => ({ event, entry: parseActionEntry(event) }))
+                .filter(({ entry }) => isErrorEntry(entry))
+                .filter(({ entry }) => {
+                    if (!needle) return true;
+                    return [
+                      entry.agent,
+                      entry.status,
+                      entry.action?.tool,
+                      getErrorMessage(entry),
+                      entry.reasoning,
+                    ].join(" ").toLowerCase().includes(needle);
+                });
+          }, [actions, filter]);
+
+          return (
+              <div className="flex flex-col h-full bg-gray-900">
+                  <div className="p-3 border-b border-gray-800 bg-gray-950">
+                      <div className="flex items-center justify-between mb-2">
+                          <div>
+                              <div className="font-bold text-gray-100 text-sm">Incidents</div>
+                              <div className="text-[11px] text-gray-500">{incidents.length} visible</div>
+                          </div>
+                          <div className="text-cyan-300 text-xl font-black">!</div>
+                      </div>
+                      <input
+                        value={filter}
+                        onChange={(e) => setFilter(e.target.value)}
+                        className="w-full bg-gray-900 border border-gray-700 rounded px-3 py-2 text-xs text-white focus:outline-none focus:border-cyan-700"
+                        placeholder="Search agent, tool, error..."
+                      />
+                  </div>
+                  <div className="flex-1 overflow-y-auto p-3 space-y-3 no-scrollbar">
+                      {incidents.length === 0 && (
+                          <div className="text-center text-gray-600 mt-10 text-sm">No matching incidents.</div>
+                      )}
+                      {incidents.map(({ event, entry }) => (
+                          <div key={event.id} className="bg-gray-800/40 border border-gray-700 rounded-lg p-3 text-xs">
+                              <div className="flex justify-between text-gray-500 mb-2">
+                                  <span className="font-bold text-cyan-200">{entry.agent || "unknown"}</span>
+                                  <span>{formatTime(entry.timestamp_intent)}</span>
+                              </div>
+                              <div className="flex items-center gap-2 mb-2">
+                                  <span className="text-gray-100 font-bold">{entry.action?.tool || "unknown_tool"}</span>
+                                  <span className="uppercase text-[10px] text-gray-300 border border-gray-600 bg-gray-900 rounded px-1">{entry.status || entry.results?.status || "error"}</span>
+                              </div>
+                              <div className="bg-black/20 border border-gray-700 rounded p-2 text-gray-200 whitespace-pre-wrap">
+                                  {getErrorMessage(entry)}
+                              </div>
+                          </div>
+                      ))}
+                  </div>
+              </div>
+          );
+      };
+
       const App = () => {
         const [activeTab, setActiveTab] = useState("chat");
         const [identity, setIdentity] = useState("Human-Abe");
@@ -342,9 +552,21 @@
         const [connected, setConnected] = useState(false);
 
         useEffect(() => {
-          const ws = new WebSocket(`ws://${window.location.host}/ws`);
+          let ws;
+          let reconnectTimer;
+          let closedByUnmount = false;
+
+          const connect = () => {
+          ws = new WebSocket(`ws://${window.location.host}/ws`);
           ws.onopen = () => setConnected(true);
-          ws.onclose = () => setConnected(false);
+          ws.onclose = () => {
+            setConnected(false);
+            if (!closedByUnmount) reconnectTimer = setTimeout(connect, 2000);
+          };
+          ws.onerror = () => {
+            setConnected(false);
+            ws.close();
+          };
 
           ws.onmessage = (event) => {
              try {
@@ -366,7 +588,7 @@
                                  const ta = JSON.parse(a.data.entry||"{}").timestamp_intent || "";
                                  const tb = JSON.parse(b.data.entry||"{}").timestamp_intent || "";
                                  return tb.localeCompare(ta); 
-                             }).slice(0, 50); 
+                             }).slice(0, 200);
                          });
                      }
                      else if (msg.stream === "volition:social_digests") {
@@ -380,7 +602,14 @@
           };
 
           setSocket(ws);
-          return () => ws.close();
+          };
+
+          connect();
+          return () => {
+            closedByUnmount = true;
+            clearTimeout(reconnectTimer);
+            ws?.close();
+          };
         }, []);
 
         const handleSendChat = (channel, content) => {
@@ -451,6 +680,7 @@
                     {activeTab === 'uplink' && <MobileUplink actions={actions} onSendEmail={handleSendEmail} />}
                     {activeTab === 'fleet' && <MobileFleet heartbeats={heartbeats} />}
                     {activeTab === 'activity' && <MobileActivity actions={actions} digests={digests} />}
+                    {activeTab === 'incidents' && <MobileIncidents actions={actions} />}
                 </SafeRender>
             </div>
 
@@ -472,6 +702,10 @@
                     <Icons.Activity />
                     <span className="text-[10px] font-bold">Activity</span>
                 </button>
+                <button onClick={() => setActiveTab('incidents')} className={`flex flex-col items-center gap-1 p-2 w-full ${activeTab==='incidents' ? 'text-cyan-300' : 'text-gray-500'}`}>
+                    <span className="text-xl leading-5 font-black">!</span>
+                    <span className="text-[10px] font-bold">Issues</span>
+                </button>
             </div>
 
           </div>
@@ -480,6 +714,7 @@
 
       const root = ReactDOM.createRoot(document.getElementById("root"));
       root.render(<App />);
+      {% endraw %}
     </script>
   </body>
 </html>
