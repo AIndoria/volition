@@ -1525,8 +1525,8 @@ class GuppiDaemon:
             event_type = event_data.get("event")
             
             # Check if this is a direct email rather than a system inbox event
-            original_event = event_data.get("payload", {}).get("event_type", "")
-            is_human_email = (event_type == "Inbox" and original_event == "NewInboxMessage")
+            payload_event_type = event_data.get("payload", {}).get("event_type", "")
+            is_human_email = (event_type == "Inbox" and payload_event_type == "NewInboxMessage")
             
             is_chat = (event_type == "Chat")
             
@@ -2373,6 +2373,8 @@ You were asleep for: {time_str}
             FROM tasks
             WHERE status IN ('completed', 'cancelled')
               AND (recurrence IS NULL OR recurrence = '')
+              AND due_timestamp IS NOT NULL
+              AND due_timestamp != ''
               AND due_timestamp < ?
             ORDER BY due_timestamp ASC
             LIMIT ?
@@ -2393,7 +2395,15 @@ You were asleep for: {time_str}
             with sqlite3.connect(str(TODO_DB)) as src, sqlite3.connect(str(backup_file)) as dst:
                 src.backup(dst)
 
-        await asyncio.to_thread(_backup_todo_db)
+        for attempt in range(2):
+            try:
+                await asyncio.to_thread(_backup_todo_db)
+                break
+            except sqlite3.Error as e:
+                if attempt == 1:
+                    logger.warning(f"Skipping todo auto-prune; backup failed: {e}")
+                    return 0
+                await asyncio.sleep(1)
 
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             await conn.execute("PRAGMA busy_timeout = 5000")
