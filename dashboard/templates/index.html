@@ -258,6 +258,26 @@
         return entry.id || `${entry.agent || "unknown"}:${entry.action?.tool || "tool"}:${entry.timestamp_intent || event.id}`;
       };
 
+      const streamIdValue = (id = "") => {
+        const [ms = "0", seq = "0"] = String(id).split("-");
+        return (Number(ms) || 0) * 10000 + (Number(seq) || 0);
+      };
+
+      const statusRank = (entry) => {
+        if (isErrorEntry(entry)) return 4;
+        if (entry.status === "completed") return 3;
+        if (entry.status === "pending") return 1;
+        return 2;
+      };
+
+      const compareActionPhase = (a, b) => {
+        const timeCompare = (a.entry.timestamp_intent || "").localeCompare(b.entry.timestamp_intent || "");
+        if (timeCompare !== 0) return timeCompare;
+        const idCompare = streamIdValue(a.event.id) - streamIdValue(b.event.id);
+        if (idCompare !== 0) return idCompare;
+        return statusRank(a.entry) - statusRank(b.entry);
+      };
+
       const groupActions = (actions) => {
         const groups = new Map();
         actions.forEach((event) => {
@@ -267,10 +287,10 @@
           groups.get(key).push({ event, entry });
         });
         return [...groups.entries()].map(([key, phases]) => {
-          phases.sort((a, b) => (a.entry.timestamp_intent || "").localeCompare(b.entry.timestamp_intent || ""));
+          phases.sort(compareActionPhase);
           const latest = phases[phases.length - 1];
           return { key, phases, latest };
-        }).sort((a, b) => (a.latest.entry.timestamp_intent || "").localeCompare(b.latest.entry.timestamp_intent || ""));
+        }).sort((a, b) => compareActionPhase(a.latest, b.latest));
       };
 
       const agentAccent = (name = "") => {
@@ -884,7 +904,9 @@
                     const sorted = [...prev, msg].sort((a, b) => {
                       const ta = parseActionEntry(a).timestamp_intent || "";
                       const tb = parseActionEntry(b).timestamp_intent || "";
-                      return ta.localeCompare(tb);
+                      const timeCompare = ta.localeCompare(tb);
+                      if (timeCompare !== 0) return timeCompare;
+                      return streamIdValue(a.id) - streamIdValue(b.id);
                     });
                     return sorted.slice(-1000);
                   });
