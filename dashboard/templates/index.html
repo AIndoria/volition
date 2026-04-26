@@ -3,649 +3,950 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Volition Command</title>
+    <title>Volition</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-      tailwind.config = {
-        darkMode: "class",
-        theme: {
-          extend: {
-            colors: {
-              gray: { 900: "#0f1115", 800: "#161b22", 700: "#21262d" },
-            },
-          },
-        },
-      };
-    </script>
-    <script
-      crossorigin
-      src="https://unpkg.com/react@18/umd/react.development.js"
-    ></script>
-    <script
-      crossorigin
-      src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"
-    ></script>
-    <script
-      crossorigin
-      src="https://unpkg.com/@babel/standalone/babel.min.js"
-    ></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script crossorigin src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
     <style>
+      :root {
+        --ink: #0c0f0e;
+        --panel: #151713;
+        --panel-2: #1b1e18;
+        --line: #303329;
+        --line-soft: #242820;
+        --text: #d9d2c2;
+        --muted: #82877b;
+        --faint: #62685d;
+        --brass: #ad9259;
+        --brass-soft: #332b19;
+        --teal: #7fb7a7;
+        --teal-soft: #132723;
+      }
+
+      html,
       body {
-        background-color: #0d1117;
-        color: #c9d1d9;
-        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica,
-          Arial, sans-serif;
+        height: 100%;
+        width: 100%;
+        margin: 0;
+        overflow: hidden;
+        background: var(--ink);
+        color: var(--text);
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        letter-spacing: 0;
       }
-      .glass-panel {
-        background: rgba(22, 27, 34, 0.95);
-        border: 1px solid #30363d;
-        backdrop-filter: blur(10px);
+
+      button,
+      input,
+      textarea,
+      select {
+        font: inherit;
       }
+
+      .app-shell {
+        background:
+          linear-gradient(180deg, rgba(195, 161, 95, 0.035), transparent 220px),
+          var(--ink);
+      }
+
+      .surface {
+        background: var(--panel);
+        border: 1px solid var(--line-soft);
+      }
+
+      .surface-raised {
+        background: var(--panel-2);
+        border: 1px solid var(--line);
+      }
+
+      .hairline {
+        border-color: var(--line-soft);
+      }
+
+      .muted {
+        color: var(--muted);
+      }
+
+      .faint {
+        color: var(--faint);
+      }
+
+      .accent {
+        color: var(--brass);
+      }
+
+      .field {
+        background: #0f1210;
+        border: 1px solid var(--line);
+        color: var(--text);
+        outline: none;
+      }
+
+      .field:focus {
+        border-color: rgba(195, 161, 95, 0.72);
+        box-shadow: 0 0 0 1px rgba(195, 161, 95, 0.18);
+      }
+
+      .nav-item {
+        color: var(--muted);
+        border: 1px solid transparent;
+      }
+
+      .nav-item:hover {
+        color: var(--text);
+        background: rgba(255, 255, 255, 0.025);
+      }
+
+      .nav-item-active {
+        color: var(--text);
+        background: var(--brass-soft);
+        border-color: rgba(195, 161, 95, 0.35);
+      }
+
       .scrollbar-thin::-webkit-scrollbar {
-        width: 6px;
+        width: 7px;
       }
+
+      .scrollbar-thin::-webkit-scrollbar-track {
+        background: transparent;
+      }
+
       .scrollbar-thin::-webkit-scrollbar-thumb {
-        background-color: #30363d;
-        border-radius: 3px;
+        background: #3c4137;
+        border-radius: 999px;
+      }
+
+      .mono {
+        font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      }
+
+      .line-clamp-3 {
+        display: -webkit-box;
+        -webkit-line-clamp: 3;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
       }
     </style>
   </head>
-  <body class="h-screen w-screen overflow-hidden flex flex-col">
+  <body>
     <div id="root" class="h-full w-full"></div>
 
     <script type="text/babel">
-      const { useState, useEffect, useRef, useMemo } = React;
-      const formatTime = (iso) => {
-        if (!iso) return "??:??:??";
+      {% raw %}
+      const { useEffect, useMemo, useRef, useState } = React;
+
+      const formatTime = (iso, opts = {}) => {
+        if (!iso) return "unknown";
         try {
-          return iso.split("T")[1].split(".")[0];
+          const normalized = iso.endsWith("Z") ? iso : `${iso}Z`;
+          return new Date(normalized).toLocaleString([], {
+            month: "short",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            ...(opts.seconds ? { second: "2-digit" } : {}),
+            hour12: false,
+          });
         } catch {
-          return new Date().toLocaleTimeString();
+          return "unknown";
         }
       };
 
-      // --- COMPONENTS ---
+      const autoResize = (el) => {
+        if (!el) return;
+        el.style.height = "auto";
+        el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+      };
 
-      const EmailView = ({ actions, onSendEmail }) => {
-        const [filterFrom, setFilterFrom] = useState("");
-        const [filterTo, setFilterTo] = useState("");
-        const [composeTo, setComposeTo] = useState("");
-        const [composeMsg, setComposeMsg] = useState("");
+      const parseActionEntry = (event) => {
+        try {
+          return JSON.parse(event?.data?.entry || "{}");
+        } catch {
+          return {};
+        }
+      };
 
-        const emails = useMemo(() => {
-          const seenIds = new Set();
+      const isErrorEntry = (entry) => {
+        const status = entry?.status || "";
+        const results = entry?.results || {};
+        const reasoning = entry?.reasoning || "";
+        return (
+          ["error", "failed", "self_correcting", "interrupted"].includes(status) ||
+          results.status === "error" ||
+          results.status === "failed" ||
+          Boolean(results.error) ||
+          (typeof reasoning === "string" && reasoning.startsWith("Error:"))
+        );
+      };
 
-          // 1. Map to standardize, capturing the Redis Stream ID for robust dedupe
-          const candidates = actions
-            .map((a) => {
-              try {
-                const entry = JSON.parse(a.data.entry || "{}");
-                if (!entry.action) return null;
-                return {
-                  ...entry,
-                  streamId: a.id, // Capture the Redis ID
-                  recipient: entry.action.recipient || "",
-                  message: entry.action.message || "",
-                };
-              } catch {
-                return null;
-              }
-            })
-            .filter((e) => e && e.action?.tool === "email_send");
+      const getErrorMessage = (entry) => {
+        const results = entry?.results || {};
+        if (results.error) return results.error;
+        if (results.message) return results.message;
+        if (entry?.reasoning?.startsWith("Error:")) return entry.reasoning;
+        return "No explicit error message captured.";
+      };
 
-          // 2. Reverse FIRST (Newest to Oldest) so we process the latest state first.
-          // This ensures if we have "completed" and "pending" logs for the same ID,
-          // we see the "completed" one first and can dedupe the older "pending" one.
-          const reversed = [...candidates].reverse();
-
-          // 3. Deduplicate and Filter
-          return reversed.filter((e) => {
-            // Filters
-            const matchFrom = filterFrom
-              ? (e.agent || "").toLowerCase().includes(filterFrom.toLowerCase())
-              : true;
-            const matchTo = filterTo
-              ? (e.recipient || "")
-                  .toLowerCase()
-                  .includes(filterTo.toLowerCase())
-              : true;
-            if (!matchFrom || !matchTo) return false;
-
-            // De-duplication Logic:
-            // Use Action ID if available (to collapse pending/completed).
-            // If no Action ID, use a fallback that INCLUDES streamId to prevent collapsing distinct messages.
-            const uniqueKey =
-              e.id || `${e.timestamp_intent}-${e.message}-${e.streamId}`;
-
-            if (seenIds.has(uniqueKey)) return false;
-            seenIds.add(uniqueKey);
-            return true;
+      const getAgentsFromHeartbeats = (heartbeats) => {
+        const map = new Map();
+        map.set("Human-Abe", { abe: "Human-Abe", display: "Human-Abe", host: "dashboard", lag: 0 });
+        const now = Date.now() / 1000;
+        heartbeats.forEach((hb) => {
+          const data = hb?.data || {};
+          const abe = data.abe;
+          if (!abe) return;
+          const rawTs = data.timestamp;
+          const parsed = rawTs ? Number(rawTs) || Date.parse(rawTs) / 1000 : now;
+          const timestamp = Number.isFinite(parsed) ? parsed : now;
+          map.set(abe, {
+            abe,
+            display: data.display || abe,
+            host: data.host || "unknown",
+            lag: now - timestamp,
           });
-        }, [actions, filterFrom, filterTo]);
-
-        const handleSend = (e) => {
-          e.preventDefault();
-          if (!composeTo || !composeMsg) return;
-          onSendEmail(composeTo, composeMsg);
-          setComposeMsg("");
-        };
-
-        return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2">
-            <div className="p-3 border-b border-gray-700 bg-gray-800 rounded-t-lg flex flex-col gap-2">
-              <div className="flex justify-between items-center">
-                <span className="font-bold">📧 Secure Uplink (Email)</span>
-                <span className="text-xs text-gray-500">
-                  {emails.length} found
-                </span>
-              </div>
-              <div className="flex gap-2">
-                <input
-                  placeholder="Filter From..."
-                  value={filterFrom}
-                  onChange={(e) => setFilterFrom(e.target.value)}
-                  className="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-white"
-                />
-                <input
-                  placeholder="Filter To..."
-                  value={filterTo}
-                  onChange={(e) => setFilterTo(e.target.value)}
-                  className="bg-gray-900 border border-gray-600 rounded px-2 py-1 text-xs text-white"
-                />
-              </div>
-            </div>
-
-            <div className="p-3 border-b border-gray-700 bg-gray-800/50">
-              <form onSubmit={handleSend} className="flex gap-2">
-                <input
-                  placeholder="To: abe-xx"
-                  value={composeTo}
-                  onChange={(e) => setComposeTo(e.target.value)}
-                  className="w-32 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white"
-                />
-                <input
-                  placeholder="Message content..."
-                  value={composeMsg}
-                  onChange={(e) => setComposeMsg(e.target.value)}
-                  className="flex-1 bg-gray-900 border border-gray-600 rounded px-2 py-1 text-sm text-white"
-                />
-                <button
-                  type="submit"
-                  className="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded text-sm font-bold"
-                >
-                  SEND
-                </button>
-              </form>
-            </div>
-
-            <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin">
-              {emails.map((e, i) => (
-                <div
-                  key={i}
-                  className="border border-gray-700 bg-gray-800/30 rounded p-3 hover:bg-gray-800 transition-colors"
-                >
-                  <div className="flex justify-between text-xs text-gray-400 mb-1">
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold text-blue-300">{e.agent}</span>
-                      <span className="text-gray-600">➔</span>
-                      <span className="font-bold text-green-300">
-                        {e.recipient}
-                      </span>
-                    </div>
-                    <span>{formatTime(e.timestamp_intent)}</span>
-                  </div>
-                  <div className="text-sm text-gray-200 whitespace-pre-wrap font-sans">
-                    {e.message}
-                  </div>
-                </div>
-              ))}
-              {emails.length === 0 && (
-                <div className="text-gray-500 text-center mt-10">
-                  No emails matching filter.
-                </div>
-              )}
-            </div>
-          </div>
-        );
+        });
+        return [...map.values()].sort((a, b) => a.display.localeCompare(b.display));
       };
 
-      const Sidebar = ({ heartbeats }) => {
-        const [now, setNow] = useState(Date.now() / 1000);
-        useEffect(() => {
-          const t = setInterval(() => setNow(Date.now() / 1000), 1000);
-          return () => clearInterval(t);
-        }, []);
+      const parseAgentLabel = (agent = {}) => {
+        const display = agent.display || agent.abe || "unknown";
+        const match = display.match(/^(abe-\d+)\s*\(([^)]+)\)$/i);
+        if (match) {
+          return { name: match[2], designation: match[1] };
+        }
+        if (agent.abe && agent.abe !== display) {
+          return { name: display, designation: agent.abe };
+        }
+        return { name: display, designation: agent.host || agent.abe || "unknown" };
+      };
 
-        const agents = useMemo(() => {
-          const map = {};
-          map["Human-Abe"] = {
-            lastSeen: Date.now() / 1000,
-            host: "dashboard",
-            display: "Human-Abe",
-          };
+      const getAgentMap = (heartbeats) => {
+        const map = new Map();
+        getAgentsFromHeartbeats(heartbeats).forEach((agent) => {
+          const label = parseAgentLabel(agent);
+          map.set(agent.abe, { ...agent, ...label });
+          map.set(agent.display, { ...agent, ...label });
+          map.set(label.name, { ...agent, ...label });
+        });
+        return map;
+      };
 
-          heartbeats.forEach((hb) => {
-            if (!hb.data) return;
-            const abe = hb.data.abe;
-            if (!abe) return;
+      const getAgentDisplay = (value, agentMap) => {
+        const agent = agentMap.get(value);
+        if (agent) return agent.name;
+        const match = String(value || "").match(/^(abe-\d+)\s*\(([^)]+)\)$/i);
+        return match ? match[2] : String(value || "unknown");
+      };
 
-            if (!map[abe]) map[abe] = { lastSeen: 0 };
-            // Robust check for display name
-            const displayName = hb.data.display || abe;
+      const getAgentInitials = (value, agentMap) => {
+        const name = getAgentDisplay(value, agentMap);
+        const words = name.split(/[\s_-]+/).filter(Boolean);
+        if (words.length >= 2) return `${words[0][0]}${words[1][0]}`.toUpperCase();
+        return name.slice(0, 2).toUpperCase();
+      };
 
-            map[abe] = {
-              lastSeen: Date.now() / 1000,
-              host: hb.data.host || "unknown",
-              display: displayName,
-            };
-          });
-          return Object.values(map)
-            .map((a) => ({ ...a, lag: Date.now() / 1000 - a.lastSeen }))
-            .sort((a, b) => a.display.localeCompare(b.display));
-        }, [heartbeats]);
+      const getStatusMeta = (entry) => {
+        if (isErrorEntry(entry)) return { label: entry.status || entry.results?.status || "error", color: "#c78978" };
+        if (entry.status === "completed") return { label: "completed", color: "var(--teal)" };
+        if (entry.status === "pending") return { label: "pending", color: "var(--brass)" };
+        if (entry.status) return { label: entry.status, color: "var(--muted)" };
+        return { label: "logged", color: "var(--faint)" };
+      };
+
+      const getActionKey = (event) => {
+        const entry = parseActionEntry(event);
+        return entry.id || `${entry.agent || "unknown"}:${entry.action?.tool || "tool"}:${entry.timestamp_intent || event.id}`;
+      };
+
+      const groupActions = (actions) => {
+        const groups = new Map();
+        actions.forEach((event) => {
+          const key = getActionKey(event);
+          const entry = parseActionEntry(event);
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push({ event, entry });
+        });
+        return [...groups.entries()].map(([key, phases]) => {
+          phases.sort((a, b) => (a.entry.timestamp_intent || "").localeCompare(b.entry.timestamp_intent || ""));
+          const latest = phases[phases.length - 1];
+          return { key, phases, latest };
+        }).sort((a, b) => (a.latest.entry.timestamp_intent || "").localeCompare(b.latest.entry.timestamp_intent || ""));
+      };
+
+      const agentAccent = (name = "") => {
+        const palette = ["#ad9259", "#7fb7a7", "#b98776", "#8fa0b3", "#a38ab8", "#91a56f", "#c29476"];
+        let hash = 0;
+        for (let i = 0; i < name.length; i += 1) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+        return palette[hash % palette.length];
+      };
+
+      const parseParticipants = (raw) => {
+        if (!raw) return [];
+        if (Array.isArray(raw)) return raw;
+        try {
+          return JSON.parse(raw);
+        } catch {
+          try {
+            return JSON.parse(raw.replace(/'/g, '"'));
+          } catch {
+            return [raw];
+          }
+        }
+      };
+
+      const SectionLabel = ({ children }) => (
+        <div className="px-3 pb-2 pt-5 text-[11px] font-semibold uppercase tracking-[0.18em] muted">
+          {children}
+        </div>
+      );
+
+      const StatusDot = ({ connected }) => (
+        <span
+          className="inline-block h-2 w-2 rounded-full"
+          style={{ background: connected ? "var(--teal)" : "var(--faint)" }}
+        />
+      );
+
+      const Sidebar = ({ activeView, setActiveView, channels, identity, setIdentity, heartbeats, connected }) => {
+        const agents = useMemo(() => getAgentsFromHeartbeats(heartbeats), [heartbeats]);
+        const liveCount = agents.filter((agent) => agent.lag < 90).length;
 
         return (
-          <div className="flex-1 overflow-y-auto p-4 space-y-3 scrollbar-thin">
-            <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">
-              Fleet Status
-            </h2>
-            {agents.map((agent, i) => (
-              <div key={i} className="flex items-center gap-3 group">
-                <div
-                  className={`h-2 w-2 rounded-full ${
-                    agent.lag < 70
-                      ? "bg-green-500 shadow-[0_0_5px_rgba(34,197,94,0.6)]"
-                      : agent.lag < 180
-                      ? "bg-yellow-500"
-                      : "bg-red-500"
-                  }`}
-                ></div>
-                <div>
-                  <div className="text-sm font-bold text-gray-200 group-hover:text-white">
-                    {agent.display}
-                  </div>
-                  <div className="text-[10px] text-gray-500">{agent.host}</div>
+          <aside className="surface flex h-full w-[300px] shrink-0 flex-col rounded-r-[10px] border-l-0 border-y-0">
+            <div className="px-6 pb-5 pt-6">
+              <div className="flex items-center justify-between">
+                <div className="text-[22px] font-semibold tracking-[0.22em]">VOLITION</div>
+                <div className="flex items-center gap-2 text-xs muted">
+                  <StatusDot connected={connected} />
+                  {connected ? "online" : "offline"}
                 </div>
               </div>
-            ))}
-          </div>
-        );
-      };
-
-      const DigestPanel = ({ digests }) => {
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [digests]
-        );
-
-        // Robust parser for the "Serialization Trap"
-        const parseParticipants = (raw) => {
-            if (!raw) return [];
-            if (Array.isArray(raw)) return raw;
-            try {
-                // Try standard JSON first
-                return JSON.parse(raw);
-            } catch (e) {
-                // Fallback for Python string lists ['a', 'b']
-                try {
-                    return JSON.parse(raw.replace(/'/g, '"'));
-                } catch (e2) {
-                    return [raw]; // Give up, return as string in array
-                }
-            }
-        };
-
-        return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
-             <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1 flex justify-between">
-              <span>Ambient Messages</span>
-              <span className="text-[10px] opacity-50">{digests.length}</span>
-            </h2>
-            <div className="flex-1 overflow-y-auto space-y-3 font-sans scrollbar-thin">
-              {digests.map((d, i) => {
-                const data = d.data || {};
-                const participants = parseParticipants(data.participants);
-                
-                return (
-                  <div key={i} className="bg-gray-800/40 border border-gray-700 rounded p-3">
-                     <div className="flex justify-between items-center mb-2">
-                        <div className="flex -space-x-2">
-                            {participants.map((p, idx) => (
-                                <div key={idx} className="w-6 h-6 rounded-full bg-blue-900 border border-gray-600 flex items-center justify-center text-[10px] font-bold text-blue-200" title={p}>
-                                    {p.substring(0,2).toUpperCase()}
-                                </div>
-                            ))}
-                        </div>
-                        <span className="text-[10px] text-gray-500">{formatTime(data.generated_at)}</span>
-                     </div>
-                     <div className="text-xs text-gray-300 leading-relaxed italic">
-                        "{data.summary}"
-                     </div>
-                     <div className="mt-2 text-[10px] text-gray-600 flex justify-between">
-                        <span>{data.msg_count} messages</span>
-                        <span>{(data.end_ts - data.start_ts).toFixed(0)}s duration</span>
-                     </div>
-                  </div>
-                );
-              })}
-              {digests.length === 0 && <div className="text-xs text-gray-600 text-center italic mt-10">No bursts detected yet.</div>}
-              <div ref={bottomRef} />
+              <div className="mt-5">
+                <label className="mb-2 block text-[11px] font-semibold uppercase tracking-[0.16em] muted">
+                  Identity
+                </label>
+                <input
+                  value={identity}
+                  onChange={(e) => setIdentity(e.target.value)}
+                  className="field w-full rounded-md px-3 py-2 text-sm"
+                  placeholder="Human-Abe"
+                />
+              </div>
             </div>
-          </div>
-        );
-      };
 
-      const ActionLog = ({ events }) => {
-        const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [events]
-        );
-        return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2 p-2 min-h-0">
-            <h2 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2 border-b border-gray-700 pb-1">
-              Action Log
-            </h2>
-            <div className="flex-1 overflow-y-auto space-y-3 font-mono text-xs scrollbar-thin">
-              {events.map((e, i) => {
-                let entry = {};
-                try {
-                  entry = JSON.parse(e.data.entry || "{}");
-                } catch {
-                  return null;
-                }
-
-                const statusColor =
-                  entry.status === "completed"
-                    ? "text-green-400"
-                    : entry.status === "pending"
-                    ? "text-yellow-400"
-                    : "text-blue-400";
-
-                return (
-                  <div
-                    key={i}
-                    className="border-l-2 border-gray-700 pl-2 py-1 hover:bg-gray-800/30 transition-colors"
+            <div className="border-t hairline px-3 pb-3">
+              <SectionLabel>Comms</SectionLabel>
+              <div className="space-y-1">
+                {channels.map((channel) => (
+                  <button
+                    key={channel}
+                    onClick={() => setActiveView(channel)}
+                    className={`nav-item ${activeView === channel ? "nav-item-active" : ""} flex w-full items-center justify-between rounded-md px-3 py-2 text-sm`}
                   >
-                    <div className="flex justify-between text-gray-500 mb-0.5">
-                      <span className="font-bold text-blue-300">
-                        {entry.agent}
-                      </span>
-                      <span>{formatTime(entry.timestamp_intent || "")}</span>
-                    </div>
-
-                    <div className={`${statusColor} font-bold mb-0.5`}>
-                      {entry.action?.tool || "Unknown Tool"}
-                    </div>
-
-                    {/* Tool Args */}
-                    <div className="text-gray-400 mb-1 break-all opacity-80">
-                      {JSON.stringify(entry.action || {}).slice(0, 100)}
-                      {JSON.stringify(entry.action || {}).length > 100
-                        ? "..."
-                        : ""}
-                    </div>
-
-                    {entry.reasoning && (
-                      <div className="text-gray-500 italic pl-2 border-l border-gray-600 mt-1">
-                        "{entry.reasoning}"
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-              <div ref={bottomRef} />
+                    <span><span className="faint">#</span> {channel.replace("chat:", "")}</span>
+                    {channel === "chat:synchronous" && <span className="text-[10px] muted">sync</span>}
+                  </button>
+                ))}
+                <button
+                  onClick={() => setActiveView("emails")}
+                  className={`nav-item ${activeView === "emails" ? "nav-item-active" : ""} flex w-full items-center rounded-md px-3 py-2 text-sm`}
+                >
+                  <span className="faint mr-2">-></span> Uplink
+                </button>
+                <button
+                  onClick={() => setActiveView("incidents")}
+                  className={`nav-item ${activeView === "incidents" ? "nav-item-active" : ""} flex w-full items-center rounded-md px-3 py-2 text-sm`}
+                >
+                  <span className="faint mr-2">!</span> Issues
+                </button>
+              </div>
             </div>
-          </div>
+
+            <div className="mt-2 flex min-h-0 flex-1 flex-col border-t hairline px-3 pb-4">
+              <SectionLabel>Fleet</SectionLabel>
+              <div className="mb-3 px-3 text-xs muted">{liveCount}/{agents.length} active</div>
+              <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
+                {agents.map((agent) => {
+                  const isLive = agent.lag < 90;
+                  const label = parseAgentLabel(agent);
+                  return (
+                    <button
+                      key={agent.abe}
+                      onClick={() => setActiveView(`agent:${agent.abe}`)}
+                      className={`mb-1 flex w-full items-center justify-between rounded-md px-3 py-2 text-left hover:bg-white/[0.025] ${activeView === `agent:${agent.abe}` ? "nav-item-active" : ""}`}
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium">{label.name}</div>
+                        <div className="truncate text-[11px] faint">{label.designation}</div>
+                      </div>
+                      <div className="flex items-center gap-2 text-[11px] muted">
+                        <span>{isLive ? "live" : `${Math.round(agent.lag)}s`}</span>
+                        <span className="h-2 w-2 rounded-full" style={{ background: isLive ? "var(--teal)" : "var(--faint)" }} />
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </aside>
         );
       };
+
+      const WorkspaceHeader = ({ title, subtitle, children }) => (
+        <div className="flex min-h-[70px] items-center justify-between border-b hairline px-6">
+          <div>
+            <h1 className="text-lg font-semibold">{title}</h1>
+            {subtitle && <div className="mt-1 text-xs muted">{subtitle}</div>}
+          </div>
+          {children}
+        </div>
+      );
 
       const ChatWindow = ({ channel, messages, onSend, identity }) => {
         const [input, setInput] = useState("");
+        const inputRef = useRef(null);
         const bottomRef = useRef(null);
-        useEffect(
-          () => bottomRef.current?.scrollIntoView({ behavior: "smooth" }),
-          [messages]
-        );
+        const displayChannel = channel ? channel.replace("chat:", "") : "unknown";
 
-        const handleSubmit = (e) => {
-          e.preventDefault();
+        useEffect(() => {
+          bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        }, [messages]);
+
+        const handleSubmit = (event) => {
+          event.preventDefault();
           if (!input.trim()) return;
           onSend(channel, input);
           setInput("");
+          requestAnimationFrame(() => autoResize(inputRef.current));
         };
 
-        const displayChannel = channel
-          ? channel.replace("chat:", "")
-          : "unknown";
+        const handleKeyDown = (event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            handleSubmit(event);
+          }
+        };
 
         return (
-          <div className="flex flex-col h-full glass-panel rounded-lg m-2">
-            <div className="p-3 border-b border-gray-700 font-bold flex justify-between items-center bg-gray-800 rounded-t-lg">
-              <span>#{displayChannel}</span>
-              {channel === "chat:synchronous" && (
-                <span className="text-xs bg-red-900 text-red-200 px-2 py-0.5 rounded animate-pulse">
-                  LIVE/SYNC
-                </span>
+          <main className="surface flex min-w-0 flex-1 flex-col rounded-[10px]">
+            <WorkspaceHeader
+              title={`#${displayChannel}`}
+              subtitle={channel === "chat:synchronous" ? "Synchronous fleet channel" : "Shared fleet channel"}
+            />
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 scrollbar-thin">
+              <div className="mx-auto max-w-5xl space-y-1">
+                {messages.map((message, index) => {
+                  const data = message?.data || {};
+                  const from = data.from || "Unknown";
+                  const isMe = from === identity || from === "Human-Abe" || from === "Human";
+                  const senderColor = isMe ? "var(--brass)" : agentAccent(from);
+                  return (
+                    <article key={message.id || index} className={`group grid grid-cols-[130px_minmax(0,1fr)] gap-4 rounded-md px-3 py-3 ${isMe ? "bg-[rgba(195,161,95,0.055)]" : "hover:bg-white/[0.018]"}`}>
+                      <div className="text-right">
+                        <div className="truncate text-sm font-semibold" style={{ color: senderColor }}>{from}</div>
+                        <div className="mt-1 text-[11px] faint">{formatTime(data.timestamp, { seconds: true })}</div>
+                      </div>
+                      <div className="max-w-3xl whitespace-pre-wrap text-[15px] leading-7 text-[#dcd8cb]">{data.content}</div>
+                    </article>
+                  );
+                })}
+                {messages.length === 0 && (
+                  <div className="py-24 text-center text-sm muted">No messages in this channel yet.</div>
+                )}
+                <div ref={bottomRef} />
+              </div>
+            </div>
+            <form onSubmit={handleSubmit} className="border-t hairline p-4">
+              <div className="mx-auto flex max-w-5xl items-end gap-3">
+                <textarea
+                  ref={inputRef}
+                  value={input}
+                  rows={1}
+                  onChange={(event) => {
+                    setInput(event.target.value);
+                    autoResize(event.target);
+                  }}
+                  onKeyDown={handleKeyDown}
+                  className="field max-h-44 min-h-[44px] flex-1 resize-none overflow-y-auto rounded-md px-4 py-3 text-sm scrollbar-thin"
+                  placeholder={`Message #${displayChannel} as ${identity}`}
+                />
+                <button className="rounded-md px-4 py-3 text-sm font-semibold text-[#0c0f0e]" style={{ background: "var(--brass)" }}>
+                  Send
+                </button>
+              </div>
+            </form>
+          </main>
+        );
+      };
+
+      const EmailView = ({ actions, heartbeats, onSendEmail }) => {
+        const [filter, setFilter] = useState("");
+        const [composeTo, setComposeTo] = useState("");
+        const [composeMsg, setComposeMsg] = useState("");
+        const msgRef = useRef(null);
+        const agents = useMemo(() => getAgentsFromHeartbeats(heartbeats), [heartbeats]);
+
+        const emails = useMemo(() => {
+          const seen = new Set();
+          return [...actions]
+            .reverse()
+            .map((action) => {
+              const entry = parseActionEntry(action);
+              if (entry.action?.tool !== "email_send") return null;
+              return {
+                ...entry,
+                streamId: action.id,
+                recipient: entry.action.recipient || "",
+                message: entry.action.message || "",
+              };
+            })
+            .filter(Boolean)
+            .filter((entry) => {
+              const uniqueKey = entry.id || `${entry.timestamp_intent}-${entry.message}-${entry.streamId}`;
+              if (seen.has(uniqueKey)) return false;
+              seen.add(uniqueKey);
+              if (!filter) return true;
+              const haystack = [entry.agent, entry.recipient, entry.message].join(" ").toLowerCase();
+              return haystack.includes(filter.toLowerCase());
+            });
+        }, [actions, filter]);
+
+        const handleSend = (event) => {
+          event.preventDefault();
+          if (!composeTo.trim() || !composeMsg.trim()) return;
+          onSendEmail(composeTo, composeMsg);
+          setComposeMsg("");
+          requestAnimationFrame(() => autoResize(msgRef.current));
+        };
+
+        return (
+          <main className="surface flex min-w-0 flex-1 flex-col rounded-[10px]">
+            <WorkspaceHeader title="Uplink" subtitle="Direct messages through Redis inboxes">
+              <input
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                className="field w-72 rounded-md px-3 py-2 text-sm"
+                placeholder="Search sent messages"
+              />
+            </WorkspaceHeader>
+
+            <div className="grid min-h-0 flex-1 grid-cols-[360px_minmax(0,1fr)]">
+              <form onSubmit={handleSend} className="border-r hairline p-5">
+                <div className="text-sm font-semibold">Compose</div>
+                <div className="mt-4 space-y-3">
+                  <input
+                    list="active-agents"
+                    value={composeTo}
+                    onChange={(event) => setComposeTo(event.target.value)}
+                    className="field w-full rounded-md px-3 py-2 text-sm"
+                    placeholder="abe-01, abe-02"
+                  />
+                  <datalist id="active-agents">
+                    {agents.map((agent) => <option key={agent.abe} value={agent.abe}>{agent.display}</option>)}
+                  </datalist>
+                  <textarea
+                    ref={msgRef}
+                    value={composeMsg}
+                    rows={8}
+                    onChange={(event) => {
+                      setComposeMsg(event.target.value);
+                      autoResize(event.target);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && !event.shiftKey) {
+                        event.preventDefault();
+                        handleSend(event);
+                      }
+                    }}
+                    className="field max-h-72 min-h-40 w-full resize-none rounded-md px-3 py-2 text-sm scrollbar-thin"
+                    placeholder="Message content"
+                  />
+                  <button className="w-full rounded-md px-4 py-2.5 text-sm font-semibold text-[#0c0f0e]" style={{ background: "var(--brass)" }}>
+                    Send Uplink
+                  </button>
+                </div>
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {agents.filter((agent) => agent.abe !== "Human-Abe").slice(0, 10).map((agent) => (
+                    <button
+                      key={agent.abe}
+                      type="button"
+                      onClick={() => setComposeTo(agent.abe)}
+                      className="rounded-full border px-2.5 py-1 text-xs muted hover:text-[var(--text)]"
+                      style={{ borderColor: "var(--line)" }}
+                    >
+                      {agent.display}
+                    </button>
+                  ))}
+                </div>
+              </form>
+
+              <div className="min-h-0 overflow-y-auto p-5 scrollbar-thin">
+                <div className="space-y-2">
+                  {emails.map((email, index) => (
+                    <article key={email.streamId || index} className="surface-raised rounded-md p-4">
+                      <div className="flex items-center justify-between text-xs muted">
+                        <div><span className="accent font-semibold">{email.agent}</span> <span className="faint">to</span> {email.recipient}</div>
+                        <div>{formatTime(email.timestamp_intent)}</div>
+                      </div>
+                      <div className="mt-3 whitespace-pre-wrap text-sm leading-6 text-[#dcd8cb]">{email.message}</div>
+                    </article>
+                  ))}
+                  {emails.length === 0 && <div className="py-24 text-center text-sm muted">No uplink messages found.</div>}
+                </div>
+              </div>
+            </div>
+          </main>
+        );
+      };
+
+      const IssuesView = ({ events }) => {
+        const [filterText, setFilterText] = useState("");
+        const [filterAgent, setFilterAgent] = useState("all");
+        const issues = useMemo(() => {
+          const seen = new Map();
+          events.forEach((event) => {
+            const entry = parseActionEntry(event);
+            if (!isErrorEntry(entry)) return;
+            seen.set(entry.id || event.id, { event, entry });
+          });
+          return [...seen.values()].reverse();
+        }, [events]);
+        const agents = useMemo(() => [...new Set(issues.map(({ entry }) => entry.agent).filter(Boolean))].sort(), [issues]);
+        const filtered = useMemo(() => {
+          const needle = filterText.toLowerCase();
+          return issues.filter(({ entry }) => {
+            if (filterAgent !== "all" && entry.agent !== filterAgent) return false;
+            if (!needle) return true;
+            return [entry.agent, entry.status, entry.action?.tool, getErrorMessage(entry), entry.reasoning].join(" ").toLowerCase().includes(needle);
+          });
+        }, [issues, filterAgent, filterText]);
+
+        return (
+          <main className="surface flex min-w-0 flex-1 flex-col rounded-[10px]">
+            <WorkspaceHeader title="Issues" subtitle={`${filtered.length} visible / ${issues.length} captured`}>
+              <div className="flex gap-2">
+                <select value={filterAgent} onChange={(event) => setFilterAgent(event.target.value)} className="field rounded-md px-3 py-2 text-sm">
+                  <option value="all">All agents</option>
+                  {agents.map((agent) => <option key={agent} value={agent}>{agent}</option>)}
+                </select>
+                <input
+                  value={filterText}
+                  onChange={(event) => setFilterText(event.target.value)}
+                  className="field w-72 rounded-md px-3 py-2 text-sm"
+                  placeholder="Search issues"
+                />
+              </div>
+            </WorkspaceHeader>
+            <div className="min-h-0 flex-1 overflow-y-auto p-5 scrollbar-thin">
+              <div className="overflow-hidden rounded-md border hairline">
+                <div className="grid grid-cols-[140px_150px_160px_minmax(0,1fr)] border-b hairline px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.14em] muted">
+                  <div>Time</div>
+                  <div>Agent</div>
+                  <div>Tool</div>
+                  <div>Detail</div>
+                </div>
+                {filtered.map(({ event, entry }) => (
+                  <article key={event.id} className="grid grid-cols-[140px_150px_160px_minmax(0,1fr)] border-b hairline px-4 py-4 text-sm last:border-b-0 hover:bg-white/[0.018]">
+                    <div className="text-xs muted">{formatTime(entry.timestamp_intent)}</div>
+                    <div className="font-semibold accent">{entry.agent || "unknown"}</div>
+                    <div className="mono text-xs muted">{entry.action?.tool || "unknown_tool"}</div>
+                    <div className="min-w-0">
+                      <div className="whitespace-pre-wrap leading-6 text-[#dcd8cb]">{getErrorMessage(entry)}</div>
+                      {entry.reasoning && !entry.reasoning.startsWith("Error:") && (
+                        <div className="mt-2 border-l-2 pl-3 text-xs italic muted" style={{ borderColor: "var(--line)" }}>
+                          {entry.reasoning}
+                        </div>
+                      )}
+                    </div>
+                  </article>
+                ))}
+                {filtered.length === 0 && <div className="py-24 text-center text-sm muted">No matching issues.</div>}
+              </div>
+            </div>
+          </main>
+        );
+      };
+
+      const ActionGroupCard = ({ group, compact = false }) => {
+        const [expanded, setExpanded] = useState(false);
+        const entry = group.latest.entry;
+        const status = getStatusMeta(entry);
+        const detail = entry.reasoning || entry.results?.message || entry.results?.error || JSON.stringify(entry.action || {});
+        const actionJson = JSON.stringify(entry.action || {}, null, 2);
+
+        return (
+          <article className="border-b hairline pb-3 last:border-b-0">
+            <button onClick={() => setExpanded(!expanded)} className="w-full text-left">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold">{entry.agent || "unknown"}</div>
+                  <div className="mono mt-1 truncate text-xs" style={{ color: status.color }}>
+                    {entry.action?.tool || "unknown_tool"}
+                  </div>
+                </div>
+                <div className="shrink-0 text-right">
+                  <div className="text-[11px] faint">{formatTime(entry.timestamp_intent)}</div>
+                  <div className="mt-1 text-[10px] uppercase tracking-[0.12em]" style={{ color: status.color }}>
+                    {status.label}{group.phases.length > 1 ? ` / ${group.phases.length}` : ""}
+                  </div>
+                </div>
+              </div>
+              <div className={`${expanded || !compact ? "" : "line-clamp-3"} mt-2 text-xs leading-5 muted`}>
+                {detail}
+              </div>
+            </button>
+            {expanded && (
+              <div className="mt-3 rounded-md border p-3" style={{ borderColor: "var(--line)", background: "#10130f" }}>
+                <div className="mb-2 text-[11px] font-semibold uppercase tracking-[0.14em] muted">Phases</div>
+                <div className="space-y-3">
+                  {group.phases.map(({ event, entry: phase }) => {
+                    const phaseStatus = getStatusMeta(phase);
+                    return (
+                      <div key={event.id} className="border-l-2 pl-3" style={{ borderColor: phaseStatus.color }}>
+                        <div className="flex justify-between gap-3 text-[11px]">
+                          <span className="uppercase tracking-[0.12em]" style={{ color: phaseStatus.color }}>{phaseStatus.label}</span>
+                          <span className="faint">{formatTime(phase.timestamp_intent, { seconds: true })}</span>
+                        </div>
+                        {phase.reasoning && <div className="mt-1 whitespace-pre-wrap text-xs leading-5 muted">{phase.reasoning}</div>}
+                        <pre className="mono mt-2 max-h-44 overflow-auto whitespace-pre-wrap rounded p-2 text-[11px] faint scrollbar-thin" style={{ background: "#0c0f0e" }}>
+                          {JSON.stringify(phase.results || phase.action || {}, null, 2)}
+                        </pre>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="mt-3 text-[11px] faint">Action: <span className="mono">{actionJson.slice(0, 260)}</span></div>
+              </div>
+            )}
+          </article>
+        );
+      };
+
+      const AgentView = ({ agentId, heartbeats, actions }) => {
+        const agentMap = useMemo(() => getAgentMap(heartbeats), [heartbeats]);
+        const agent = agentMap.get(agentId) || { abe: agentId, name: agentId, designation: agentId, host: "unknown" };
+        const aliases = new Set([agentId, agent.abe, agent.display, agent.name, `${agent.abe} (${agent.name})`].filter(Boolean));
+        const actionGroups = useMemo(() => {
+          return groupActions(actions)
+            .filter((group) => aliases.has(group.latest.entry.agent))
+            .reverse();
+        }, [actions, agentId, heartbeats]);
+        const issueCount = actionGroups.filter((group) => isErrorEntry(group.latest.entry)).length;
+
+        return (
+          <main className="surface flex min-w-0 flex-1 flex-col rounded-[10px]">
+            <WorkspaceHeader title={agent.name} subtitle={`${agent.designation} · ${agent.host || "unknown host"} · ${actionGroups.length} actions · ${issueCount} issues`} />
+            <div className="grid min-h-0 flex-1 grid-cols-[260px_minmax(0,1fr)]">
+              <div className="border-r hairline p-5">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.14em] muted">Status</div>
+                <div className="mt-4 space-y-3 text-sm">
+                  <div className="flex justify-between gap-4"><span className="muted">Designation</span><span>{agent.designation}</span></div>
+                  <div className="flex justify-between gap-4"><span className="muted">Host</span><span className="truncate">{agent.host}</span></div>
+                  <div className="flex justify-between gap-4"><span className="muted">Lag</span><span>{agent.lag < 90 ? "live" : `${Math.round(agent.lag || 0)}s`}</span></div>
+                </div>
+                <div className="mt-8 text-[11px] font-semibold uppercase tracking-[0.14em] muted">Available Now</div>
+                <div className="mt-3 text-xs leading-5 muted">
+                  This view uses the existing Redis heartbeat and action log only. Clipboard, priors, and local files would need a backend tool or agent-reported stream.
+                </div>
+              </div>
+              <div className="min-h-0 overflow-y-auto p-5 scrollbar-thin">
+                <div className="space-y-4">
+                  {actionGroups.map((group) => <ActionGroupCard key={group.key} group={group} compact={false} />)}
+                  {actionGroups.length === 0 && <div className="py-24 text-center text-sm muted">No actions captured for this Abe.</div>}
+                </div>
+              </div>
+            </div>
+          </main>
+        );
+      };
+
+      const ActivityRail = ({ actions, digests, heartbeats }) => {
+        const [tab, setTab] = useState("actions");
+        const [collapsed, setCollapsed] = useState(true);
+        const agentMap = useMemo(() => getAgentMap(heartbeats), [heartbeats]);
+        const recentActions = useMemo(() => groupActions(actions).reverse().slice(0, 70), [actions]);
+        const recentDigests = useMemo(() => [...digests].reverse().slice(0, 30), [digests]);
+
+        return (
+          <aside className="surface flex h-full w-[380px] shrink-0 flex-col rounded-[10px]">
+            <div className="flex min-h-[70px] items-center justify-between border-b hairline px-4">
+              <div>
+                <div className="text-sm font-semibold">Activity</div>
+                <div className="mt-1 text-xs muted">{tab === "actions" ? `${recentActions.length} grouped actions` : `${recentDigests.length} ambient digests`}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                {tab === "actions" && (
+                  <button onClick={() => setCollapsed(!collapsed)} className="rounded border px-2 py-1 text-[11px] muted" style={{ borderColor: "var(--line)" }}>
+                    {collapsed ? "compact" : "full"}
+                  </button>
+                )}
+                <div className="surface-raised flex rounded-md p-1">
+                  {["actions", "digests"].map((name) => (
+                    <button
+                      key={name}
+                      onClick={() => setTab(name)}
+                      className={`rounded px-3 py-1.5 text-xs ${tab === name ? "text-[#0c0f0e]" : "muted"}`}
+                      style={{ background: tab === name ? "var(--brass)" : "transparent" }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin">
+              {tab === "actions" ? (
+                <div className="space-y-3">
+                  {recentActions.map((group) => <ActionGroupCard key={group.key} group={group} compact={collapsed} />)}
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {recentDigests.map((digest) => {
+                    const data = digest.data || {};
+                    const participants = parseParticipants(data.participants);
+                    return (
+                      <article key={digest.id} className="surface-raised rounded-md p-3">
+                        <div className="mb-2 flex items-center justify-between text-[11px] muted">
+                          <div className="flex -space-x-1.5">
+                            {participants.slice(0, 8).map((participant, index) => (
+                              <span key={`${participant}-${index}`} className="grid h-6 w-6 place-items-center rounded-full border text-[9px]" style={{ background: "var(--teal-soft)", borderColor: "var(--line)", color: "var(--teal)" }}>
+                                {getAgentInitials(participant, agentMap)}
+                              </span>
+                            ))}
+                          </div>
+                          <span>{formatTime(data.generated_at)}</span>
+                        </div>
+                        <div className="text-xs italic leading-5 text-[#cbc7ba]">{data.summary}</div>
+                        <div className="mt-3 flex justify-between text-[11px] faint">
+                          <span>{data.msg_count || 0} messages</span>
+                          <span>{Number(data.end_ts - data.start_ts || 0).toFixed(0)}s</span>
+                        </div>
+                      </article>
+                    );
+                  })}
+                  {recentDigests.length === 0 && <div className="py-16 text-center text-sm muted">No digests yet.</div>}
+                </div>
               )}
             </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-thin">
-              {messages.map((m, i) => {
-                const isMe = m.data.from === identity || m.data.from === "Human-Abe";
-                return (
-                  <div
-                    key={i}
-                    className={`flex ${isMe ? "justify-end" : "justify-start"}`}
-                  >
-                    <div
-                      className={`max-w-[80%] rounded-lg p-3 ${
-                        isMe
-                          ? "bg-blue-900/40 border border-blue-800/50"
-                          : "bg-gray-800/60 border border-gray-700"
-                      }`}
-                    >
-                      <div className="flex items-center gap-2 text-xs text-gray-400 mb-1">
-                        <span
-                          className={`font-bold ${
-                            isMe ? "text-blue-300" : "text-green-300"
-                          }`}
-                        >
-                          {m.data.from}
-                        </span>
-                        <span>{formatTime(m.data.timestamp)}</span>
-                      </div>
-                      <div className="text-sm whitespace-pre-wrap leading-relaxed">
-                        {m.data.content}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-              <div ref={bottomRef} />
-            </div>
-            <form
-              onSubmit={handleSubmit}
-              className="p-3 border-t border-gray-700"
-            >
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm focus:outline-none focus:border-blue-500 transition-colors"
-                placeholder={`Message #${displayChannel} as ${identity}...`}
-              />
-            </form>
-          </div>
+          </aside>
         );
       };
 
       const App = () => {
         const [socket, setSocket] = useState(null);
+        const [connected, setConnected] = useState(false);
+        const [identity, setIdentity] = useState("Human-Abe");
         const [activeView, setActiveView] = useState("chat:general");
-        const [identity, setIdentity] = useState("Human-Abe"); // New Identity State
-
+        const [channels, setChannels] = useState(["chat:general", "chat:synchronous"]);
         const [chats, setChats] = useState({});
         const [actions, setActions] = useState([]);
-        const [digests, setDigests] = useState([]); // New State
+        const [digests, setDigests] = useState([]);
         const [heartbeats, setHeartbeats] = useState([]);
-        const [channels, setChannels] = useState([
-          "chat:general",
-          "chat:synchronous",
-        ]);
-        
-        // Right Panel Toggle State
-        const [showLogs, setShowLogs] = useState(true);
-        const [showDigests, setShowDigests] = useState(true);
 
         useEffect(() => {
-          const ws = new WebSocket(`ws://${window.location.host}/ws`);
+          let ws;
+          let reconnectTimer;
+          let closedByUnmount = false;
 
-          ws.onopen = () => console.log("Connected to Volition");
-
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(event.data);
-
-              if (msg.type === "channel_discovery") {
-                setChannels((prev) => {
-                  if (prev.includes(msg.channel)) return prev;
-                  const others = [...prev, msg.channel]
-                    .filter(
-                      (c) => c !== "chat:general" && c !== "chat:synchronous"
-                    )
-                    .sort();
-                  return ["chat:general", "chat:synchronous", ...others];
-                });
-              } else if (msg.type === "stream_event") {
+          const connect = () => {
+            ws = new WebSocket(`ws://${window.location.host}/ws`);
+            ws.onopen = () => setConnected(true);
+            ws.onclose = () => {
+              setConnected(false);
+              if (!closedByUnmount) reconnectTimer = setTimeout(connect, 2000);
+            };
+            ws.onerror = () => {
+              setConnected(false);
+              ws.close();
+            };
+            ws.onmessage = (event) => {
+              try {
+                const msg = JSON.parse(event.data);
+                if (msg.type === "channel_discovery") {
+                  setChannels((prev) => {
+                    if (prev.includes(msg.channel)) return prev;
+                    const discovered = [...prev, msg.channel]
+                      .filter((channel) => channel !== "chat:general" && channel !== "chat:synchronous")
+                      .sort();
+                    return ["chat:general", "chat:synchronous", ...discovered];
+                  });
+                  return;
+                }
+                if (msg.type !== "stream_event") return;
                 if (msg.stream.startsWith("chat:")) {
                   setChats((prev) => ({
                     ...prev,
-                    [msg.stream]: [...(prev[msg.stream] || []), msg].sort(
-                      (a, b) =>
-                        (a.data.timestamp || "").localeCompare(
-                          b.data.timestamp || ""
-                        )
-                    ),
+                    [msg.stream]: [...(prev[msg.stream] || []), msg].sort((a, b) => (a.data.timestamp || "").localeCompare(b.data.timestamp || "")),
                   }));
-                }
-                if (msg.stream === "volition:action_log") {
+                } else if (msg.stream === "volition:action_log") {
                   setActions((prev) => {
-                    const exists = prev.some((p) => p.id === msg.id);
-                    if (exists) return prev;
-                    
-                    // Sort AND Slice to keep only the last 100
+                    if (prev.some((item) => item.id === msg.id)) return prev;
                     const sorted = [...prev, msg].sort((a, b) => {
-                      const ta = JSON.parse(a.data.entry || "{}").timestamp_intent || "";
-                      const tb = JSON.parse(b.data.entry || "{}").timestamp_intent || "";
+                      const ta = parseActionEntry(a).timestamp_intent || "";
+                      const tb = parseActionEntry(b).timestamp_intent || "";
                       return ta.localeCompare(tb);
                     });
-                    
-                    return sorted.slice(-200);
+                    return sorted.slice(-1000);
                   });
-                }
-                if (msg.stream === "volition:social_digests") {
-                    setDigests((prev) => {
-                        const exists = prev.some((p) => p.id === msg.id);
-                        if (exists) return prev;
-                        // Sort by generated_at
-                        return [...prev, msg].sort((a, b) => 
-                            (a.data.generated_at || "").localeCompare(b.data.generated_at || "")
-                        );
-                    });
-                }
-                if (msg.stream === "volition:heartbeat") {
-                  setHeartbeats((prev) => {
-                    return [...prev.slice(-100), msg];
+                } else if (msg.stream === "volition:social_digests") {
+                  setDigests((prev) => {
+                    if (prev.some((item) => item.id === msg.id)) return prev;
+                    return [...prev, msg].sort((a, b) => (a.data.generated_at || "").localeCompare(b.data.generated_at || ""));
                   });
+                } else if (msg.stream === "volition:heartbeat") {
+                  setHeartbeats((prev) => [...prev.slice(-140), msg]);
                 }
+              } catch (error) {
+                console.error("Parse error on WS message:", error);
               }
-            } catch (e) {
-              console.error("Parse error on WS message:", e);
-            }
+            };
+            setSocket(ws);
           };
-          setSocket(ws);
-          return () => ws.close();
+
+          connect();
+          return () => {
+            closedByUnmount = true;
+            clearTimeout(reconnectTimer);
+            ws?.close();
+          };
         }, []);
 
         const handleSendChat = (channel, content) => {
-          if (socket)
-            socket.send(
-              JSON.stringify({
-                action: "post",
-                channel: channel.replace("chat:", ""),
-                content,
-                sender: identity // Pass Identity
-              })
-            );
+          socket?.send(JSON.stringify({
+            action: "post",
+            channel: channel.replace("chat:", ""),
+            content,
+            sender: identity,
+          }));
         };
 
         const handleSendEmail = (target, content) => {
-          if (socket)
-            socket.send(JSON.stringify({ 
-                action: "email", 
-                target, 
-                content,
-                sender: identity // Pass Identity
-            }));
+          socket?.send(JSON.stringify({
+            action: "email",
+            target,
+            content,
+            sender: identity,
+          }));
         };
 
         return (
-          <div className="flex h-full bg-[#0d1117]">
-            <div className="flex flex-col w-64 glass-panel m-2 rounded-lg border-r border-gray-800">
-              <div className="p-4 text-xl font-bold text-white tracking-widest border-b border-gray-800 text-center bg-gray-900/50 rounded-t-lg">
-                VOLITION
-              </div>
-
-              {/* IDENTITY INPUT */}
-              <div className="p-2 border-b border-gray-800 bg-gray-900/30">
-                  <div className="text-[10px] text-gray-500 font-bold mb-1 uppercase tracking-widest">Identity</div>
-                  <input 
-                    value={identity}
-                    onChange={(e) => setIdentity(e.target.value)}
-                    className="w-full bg-gray-900 border border-gray-700 text-sm text-blue-200 p-1.5 rounded focus:outline-none focus:border-blue-500"
-                    placeholder="Sender Name..."
-                  />
-              </div>
-
-              <div className="p-2 space-y-1">
-                <div className="text-[10px] text-gray-500 px-4 py-2 font-bold uppercase tracking-widest">
-                  COMMS
-                </div>
-                {channels.map((ch) => (
-                  <button
-                    key={ch}
-                    onClick={() => setActiveView(ch)}
-                    className={`w-full text-left px-4 py-2 rounded text-sm transition-all ${
-                      activeView === ch
-                        ? "bg-gray-800 text-white shadow-md"
-                        : "text-gray-400 hover:bg-gray-800/50"
-                    }`}
-                  >
-                    <span className="opacity-50 mr-2">#</span>
-                    {ch.replace("chat:", "")}
-                  </button>
-                ))}
-                <button
-                  onClick={() => setActiveView("emails")}
-                  className={`w-full text-left px-4 py-2 rounded text-sm transition-all mt-2 ${
-                    activeView === "emails"
-                      ? "bg-blue-900/30 text-blue-300 border border-blue-800/30"
-                      : "text-gray-400 hover:bg-gray-800/50"
-                  }`}
-                >
-                  <span className="mr-2">✉️</span>Uplink
-                </button>
-              </div>
-
-              <div className="flex-1 overflow-hidden flex flex-col border-t border-gray-800 mt-2">
-                <Sidebar heartbeats={heartbeats} />
-              </div>
-            </div>
-
-            <div className="flex-1 flex flex-col min-w-0 py-2">
+          <div className="app-shell flex h-full gap-3 p-3">
+            <Sidebar
+              activeView={activeView}
+              setActiveView={setActiveView}
+              channels={channels}
+              identity={identity}
+              setIdentity={setIdentity}
+              heartbeats={heartbeats}
+              connected={connected}
+            />
+            <div className="flex min-w-0 flex-1 gap-3">
               {activeView === "emails" ? (
-                <EmailView actions={actions} onSendEmail={handleSendEmail} />
+                <EmailView actions={actions} heartbeats={heartbeats} onSendEmail={handleSendEmail} />
+              ) : activeView === "incidents" ? (
+                <IssuesView events={actions} />
+              ) : activeView.startsWith("agent:") ? (
+                <AgentView agentId={activeView.replace("agent:", "")} heartbeats={heartbeats} actions={actions} />
               ) : (
                 <ChatWindow
                   channel={activeView}
@@ -654,45 +955,14 @@
                   identity={identity}
                 />
               )}
-            </div>
-
-            <div className="w-96 flex flex-col py-2 pr-2 h-full">
-               {/* Toggle Controls */}
-               <div className="flex justify-end gap-1 mb-1 px-2">
-                  <button 
-                    onClick={() => setShowLogs(!showLogs)} 
-                    className={`text-[10px] px-2 py-0.5 rounded border ${showLogs ? 'bg-blue-900/30 border-blue-800 text-blue-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
-                  >
-                    LOGS
-                  </button>
-                  <button 
-                    onClick={() => setShowDigests(!showDigests)} 
-                    className={`text-[10px] px-2 py-0.5 rounded border ${showDigests ? 'bg-purple-900/30 border-purple-800 text-purple-200' : 'bg-gray-800 border-gray-700 text-gray-500'}`}
-                  >
-                    DIGESTS
-                  </button>
-               </div>
-
-               {/* Stacked Panels */}
-               <div className="flex-1 flex flex-col min-h-0 gap-2">
-                  {showLogs && (
-                      <div className={`${showDigests ? 'h-1/2' : 'h-full'} transition-all duration-300`}>
-                        <ActionLog events={actions} />
-                      </div>
-                  )}
-                  {showDigests && (
-                      <div className={`${showLogs ? 'h-1/2' : 'h-full'} transition-all duration-300`}>
-                        <DigestPanel digests={digests} />
-                      </div>
-                  )}
-               </div>
+              <ActivityRail actions={actions} digests={digests} heartbeats={heartbeats} />
             </div>
           </div>
         );
       };
 
-      const root = ReactDOM.createRoot(document.getElementById("root"));
-      root.render(<App />);
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+      {% endraw %}
     </script>
   </body>
 </html>
