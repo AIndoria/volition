@@ -366,7 +366,8 @@ class GuppiDaemon:
         c = conn.cursor()
         c.execute('''CREATE TABLE IF NOT EXISTS tasks
                      (task_id TEXT PRIMARY KEY, description TEXT, priority INTEGER,
-                      due_timestamp TEXT, created_timestamp TEXT, source_abe TEXT, status TEXT)''')
+                      due_timestamp TEXT, created_timestamp TEXT, source_abe TEXT, status TEXT,
+                      recurrence TEXT DEFAULT '')''')
         c.execute("PRAGMA table_info(tasks)")
         columns = {row[1] for row in c.fetchall()}
         if "recurrence" not in columns:
@@ -995,7 +996,7 @@ class GuppiDaemon:
                 await db.execute("PRAGMA busy_timeout = 5000;")
                 
                 # FIX 2: Filter out garbage rows
-                query = "SELECT due_timestamp FROM tasks WHERE status != 'completed' AND due_timestamp IS NOT NULL AND due_timestamp != '' ORDER BY due_timestamp ASC LIMIT 1"
+                query = "SELECT due_timestamp FROM tasks WHERE status NOT IN ('completed', 'cancelled') AND due_timestamp IS NOT NULL AND due_timestamp != '' ORDER BY due_timestamp ASC LIMIT 1"
                 async with db.execute(query) as cursor:
                     row = await cursor.fetchone()
                     if not row: return 3600 * 24 # Default long sleep
@@ -1247,7 +1248,7 @@ class GuppiDaemon:
         async with aiosqlite.connect(str(TODO_DB)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
-                "SELECT * FROM tasks WHERE status != 'completed' AND due_timestamp <= ? ORDER BY due_timestamp ASC LIMIT 5",
+                "SELECT * FROM tasks WHERE status NOT IN ('completed', 'cancelled') AND due_timestamp <= ? ORDER BY due_timestamp ASC LIMIT 5",
                 (now_ts,)
             ) as cursor:
                 due_tasks = await cursor.fetchall()
@@ -1693,11 +1694,6 @@ class GuppiDaemon:
         return await self._call_openai_compat(model_id, prompt_text, api_url)
     
     async def _call_openai_compat(self, model_id, prompt, api_url=None):
-        # 0. Load the Identity Stats (Personality Drift)
-        # These are our baselines. If the file is missing, it defaults to 1.0 / 0.95
-        target_temp = float(self.identity.get("temp", 1.0))
-        target_top_p = float(self.identity.get("top_p", 0.95))
-
         # 1. Detect Thinking Intent
         use_thinking = ":thinking" in model_id
         if use_thinking: 
@@ -1771,7 +1767,7 @@ class GuppiDaemon:
         else:
             # Safe Fallbacks for Scribe/Summarizer models (like Mistral/Nanbeige)
             payload.update({
-                "top_k": 40,
+                "top_k": target_top_k,
                 "presence_penalty": 0.0,
                 "repetition_penalty": 1.0
             })
@@ -1928,7 +1924,7 @@ You were asleep for: {time_str}
             now_iso = datetime.utcnow().isoformat()
             async with aiosqlite.connect(str(TODO_DB)) as conn:
                 conn.row_factory = aiosqlite.Row
-                async with conn.execute("SELECT * FROM tasks WHERE due_timestamp <= ? AND status != 'completed'", (now_iso,)) as c:
+                async with conn.execute("SELECT * FROM tasks WHERE due_timestamp <= ? AND status NOT IN ('completed', 'cancelled')", (now_iso,)) as c:
                     due_tasks = [dict(row) for row in await c.fetchall()]
         except Exception as e:
             logger.error(f"Failed to fetch due tasks for context: {e}")
@@ -2307,6 +2303,7 @@ You were asleep for: {time_str}
             "todo_add": "Add task. Args: task, priority, due, recurrence (optional, e.g. '24h', '7d'). If recurrence is set, completing the task will automatically reschedule it.",
             "todo_complete": "Mark a task as completed. Args: task_id",
             "todo_cancel": "Cancel a task. Args: task_id",
+            "snooze_task": "Snooze a task. Args: task_id, due_in",
             "email_send": "Send Redis msg. Args: recipient, message",
             "spawn_abe": "Clone self. Args: host, identity",
             "subscribe_channel": "Listen to a Redis Stream. Args: channel",
@@ -2371,28 +2368,35 @@ You were asleep for: {time_str}
         backup_file = TODO_DB.with_suffix(".bak.autoprune")
         cutoff = (datetime.utcnow() - timedelta(days=retention_days)).isoformat()
 
+        query = """
+            SELECT *
+            FROM tasks
+            WHERE status IN ('completed', 'cancelled')
+              AND (recurrence IS NULL OR recurrence = '')
+              AND due_timestamp < ?
+            ORDER BY due_timestamp ASC
+            LIMIT ?
+        """
+
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             conn.row_factory = aiosqlite.Row
             await conn.execute("PRAGMA busy_timeout = 5000")
-
-            query = """
-                SELECT *
-                FROM tasks
-                WHERE status IN ('completed', 'cancelled')
-                  AND (recurrence IS NULL OR recurrence = '')
-                  AND due_timestamp < ?
-                ORDER BY due_timestamp ASC
-                LIMIT ?
-            """
-
             async with conn.execute(query, (cutoff, batch_size)) as c:
                 rows = [dict(row) for row in await c.fetchall()]
 
-            if not rows:
-                return 0
-            # Single rolling backup to prevent disk clutter
-            shutil.copy2(TODO_DB, backup_file)
+        if not rows:
+            return 0
 
+        # Single rolling backup to prevent disk clutter. Use SQLite's backup API
+        # instead of copying the raw database file while connections may be active.
+        def _backup_todo_db():
+            with sqlite3.connect(str(TODO_DB)) as src, sqlite3.connect(str(backup_file)) as dst:
+                src.backup(dst)
+
+        await asyncio.to_thread(_backup_todo_db)
+
+        async with aiosqlite.connect(str(TODO_DB)) as conn:
+            await conn.execute("PRAGMA busy_timeout = 5000")
             archive_file.parent.mkdir(parents=True, exist_ok=True)
             with open(archive_file, "a", encoding="utf-8") as f:
                 for row in rows:
