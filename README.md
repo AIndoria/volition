@@ -5,7 +5,7 @@ However, this public release is new and has not yet been exercised end-to-end by
 >Core architecture and invariants are stable, but installation paths will be refined over the next few weeks as this release is tested in the open.
 
 
-![](https://tabula.civitat.es/images/2026/03/15/kFFFp.png)
+![](https://tabula.civitat.es/images/2026/04/27/k0DA7.png)
 
 # Volition
 
