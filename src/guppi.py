@@ -712,13 +712,21 @@ class GuppiDaemon:
             archive_path = ARCHIVE_DIR / f"log-{ts}.jsonl"
             try: shutil.copy2(WORKING_LOG, archive_path)
             except: pass
-            
+            # 8.1: fix prune slice logic
             async with self.log_lock:
-                prune_size = len(self.log_buffer)
-                buffer_snapshot = list(self.log_buffer[-20:])
+                buffer_len = len(self.log_buffer)
+                retained_count = 10
+                # Calculate exactly how many of the oldest items to summarize (max 20)
+                summarized_count = min(max(0, buffer_len - retained_count), 20)
+                if summarized_count <= 0:
+                    self._is_pruning = False
+                    self._current_prune_id = None
+                    return
+                # Grab the OLDEST entries (head of the list)
+                buffer_snapshot = list(self.log_buffer[:summarized_count])
             try:
-                # Grab the last 20 entries safely truncated
-                log_content = self._sanitize_history_block(limit=20, buffer_override=buffer_snapshot)
+                # We pass limit=summarized_count so it doesn't truncate our snapshot
+                log_content = self._sanitize_history_block(limit=summarized_count, buffer_override=buffer_snapshot)
             except Exception as e:
                 log_content = f"Error reading log: {e}"
 
@@ -751,7 +759,8 @@ class GuppiDaemon:
                 "source_tier_1": f"log-{ts}.jsonl",
                 "mode": "summarize",
                 "is_auto_prune": True,   # <--- So I can track it (and so can the Abes later)
-                "prune_size": prune_size, # Inject snapshot size
+                "drop_count": summarized_count,
+                "buffer_len_at_prune": buffer_len, # For debugging/forensics
                 "prune_id": self._current_prune_id,
                 "prompt_path": prompt_path
             })
@@ -1151,32 +1160,17 @@ class GuppiDaemon:
             # Job finished successfully, handle auto-prune specifics
             if evt_type in self.SCRIBE_SUCCESS_EVENTS and meta.get("is_auto_prune"):
                 if ingest_success:
-                    prune_size = meta.get("prune_size")
-                    if isinstance(prune_size, int):
-                        logger.info("Tier 2 Episode successfully generated. Pruning working memory.")
+                    # Look exactly for drop_count. No math. No fallbacks.
+                    drop_count = meta.get("drop_count")
+                    
+                    if isinstance(drop_count, int) and drop_count > 0:
+                        logger.info(f"Tier 2 Episode generated. Dropping {drop_count} oldest entries.")
                         async with self.log_lock:
-                            # We only summarized a max of 20 entries, so only prune within
-                            # that summarized tail and leave any older unsummarized history intact.
-                            summarized_count = min(prune_size, 20)
-                            retained_count = 10
-
-                            tail_start = max(0, len(self.log_buffer) - summarized_count)
-                            unsummarized_prefix = self.log_buffer[:tail_start]
-                            summarized_tail = self.log_buffer[tail_start:]
-
-                            drop_count = max(0, len(summarized_tail) - retained_count)
-                            intended_drop_count = max(0, prune_size - retained_count)
-
-                            if drop_count < intended_drop_count:
-                                logger.warning(
-                                    f"Limiting prune drop_count to {drop_count} to avoid deleting unsummarized history."
-                                )
-
-                            retained_tail = summarized_tail[drop_count:]
-                            self.log_buffer = unsummarized_prefix + retained_tail
+                            # Drop exactly what we summarized from the head of the list
+                            self.log_buffer = self.log_buffer[drop_count:]
                             await self._rewrite_log_file()
                     else:
-                        logger.error(f"CRITICAL: Missing or invalid prune_size ({prune_size}). Skipping memory prune.")
+                        logger.error(f"CRITICAL: Missing or invalid drop_count ({drop_count}). Skipping memory prune.")
                 else:
                     logger.warning("Tier 2 ingestion failed. Skipping memory prune to avoid data loss.")
                 
