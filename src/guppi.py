@@ -306,7 +306,7 @@ class GuppiDaemon:
         cut_size = len(text) - limit
         return text[:limit] + f"\n... [Hey this is an automated thing set up by THE Abe -- Whatever you're trying, it was flagged because you're trying to spend more than {limit} chars this turn. This is unadvised. Try to reduce the intake. Original Err Message: TRUNCATED BY GUPPI SAFETY {cut_size} chars removed. Spawn a scribe with a specific task if you want to go over the entire file, or grep selectively (if you are certain what you're looking for) to read remainder.] ..."
     
-    def _atomic_write_json(path: Path, data: dict):
+    def _atomic_write_json(self, path: Path, data: dict):
         """Safely writes JSON to avoid corruption during simultaneous Abe updates."""
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tf:
@@ -2322,6 +2322,11 @@ You were asleep for: {time_str}
                 
                 if not target_host or not script_path:
                     result = {"status": "error", "message": "Missing host or script path"}
+                elif target_host in ["local", "localhost", "127.0.0.1", "gsv-contents-under-pressure"]:
+                    result = {
+                        "status": "error", 
+                        "message": "Do NOT register local container scripts here. GUPPI injects your local ~/bin automatically. This registry is for REMOTE hosts only (e.g. alexandria, slv-wdym-buffering)."
+                    }
                 else:
                     try:
                         registry = json.loads(SCRIPT_REGISTRY_FILE.read_text())
@@ -2336,13 +2341,13 @@ You were asleep for: {time_str}
                             result = {"status": "error", "message": "Missing description for script"}
                         else:
                             registry[target_host][script_path] = desc
-                            self._write_json_atomic(SCRIPT_REGISTRY_FILE, registry)
+                            self._atomic_write_json(SCRIPT_REGISTRY_FILE, registry)
                             result = {"status": "success", "note": f"Saved {script_path} to {target_host} registry."}
                             
                     elif action_type == "remove":
-                        if script_path in registry[target_host]:
+                        if script_path in registry.get(target_host, {}):
                             del registry[target_host][script_path]
-                            self._write_json_atomic(SCRIPT_REGISTRY_FILE, registry)
+                            self._atomic_write_json(SCRIPT_REGISTRY_FILE, registry)
                             result = {"status": "success", "note": f"Removed {script_path} from registry."}
                         else:
                             result = {"status": "noop", "note": "Script path not found in registry."}
