@@ -61,6 +61,9 @@ COMM_LOG = ABE_ROOT / "communications.log" # The "Mbox" archive
 GENESIS_PROMPT_FILE = DOCS_DIR / os.environ.get("GENESIS_PROMPT_FILE", "0.0-Abe-Genesis_Prompt.md")
 PROTOCOLS_FILE = DOCS_DIR / "Fleet_Protocols.md"
 DOWNLOADS_DIR = MEMORY_DIR / "downloads"
+FLEET_DIR = ABE_ROOT / os.environ.get("FLEET_DIR", "fleet")
+SCRIPT_REGISTRY_FILE = FLEET_DIR / "script_registry.json"
+
 # v7.2.1: Flight Recorder Log
 LOGS_DIR = ABE_ROOT / "logs"
 INBOX_DUMP_LOG = LOGS_DIR / "inbox_dump.jsonl"
@@ -107,7 +110,7 @@ DEFAULT_LOCK_TTL_MS = 60000
 
 # Safety
 STREAM_DENY_LIST = ["volition:action_log", "volition:heartbeat", "volition:log_stream"]
-FLASH_FORBIDDEN_TOOLS = {"shell", "write_file", "spawn_abe", "remote_exec", "spawn_scribe"}
+FLASH_FORBIDDEN_TOOLS = {"shell", "write_file", "spawn_abe", "remote_exec", "spawn_scribe", "manage_script_registry"}
 
 # Logging Setup
 logging.basicConfig(
@@ -302,6 +305,15 @@ class GuppiDaemon:
             return text
         cut_size = len(text) - limit
         return text[:limit] + f"\n... [Hey this is an automated thing set up by THE Abe -- Whatever you're trying, it was flagged because you're trying to spend more than {limit} chars this turn. This is unadvised. Try to reduce the intake. Original Err Message: TRUNCATED BY GUPPI SAFETY {cut_size} chars removed. Spawn a scribe with a specific task if you want to go over the entire file, or grep selectively (if you are certain what you're looking for) to read remainder.] ..."
+    
+    def _atomic_write_json(self, path: Path, data: dict):
+        """Safely writes JSON to avoid corruption during simultaneous Abe updates."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False) as tf:
+            json.dump(data, tf, indent=2, sort_keys=True)
+            tf.write("\n")
+            temp_path = Path(tf.name)
+        os.replace(temp_path, path)
 
     async def _monitor_subprocess(self, turn_id, proc):
         """Dedicated task to wait for a process and release semaphore."""
@@ -353,11 +365,12 @@ class GuppiDaemon:
         logger.info(f"Identity Refreshed: {self.display_name}")
 
     def _init_fs(self):
-        for d in [BIN_DIR, DOCS_DIR, EPISODES_DIR, ARCHIVE_DIR, MEMORY_DIR, DOWNLOADS_DIR, LOGS_DIR]:
+        for d in [BIN_DIR, DOCS_DIR, EPISODES_DIR, ARCHIVE_DIR, MEMORY_DIR, DOWNLOADS_DIR, LOGS_DIR, FLEET_DIR]:
             d.mkdir(parents=True, exist_ok=True)
         if not WORKING_LOG.exists(): WORKING_LOG.touch()
         if not COMM_LOG.exists(): COMM_LOG.touch()
         if not INBOX_DUMP_LOG.exists(): INBOX_DUMP_LOG.touch()
+        if not SCRIPT_REGISTRY_FILE.exists(): SCRIPT_REGISTRY_FILE.write_text("{}")
         self._cleanup_overflow()
 
     def _init_db_sync(self):
@@ -1951,8 +1964,30 @@ You were asleep for: {time_str}
                 if f.is_file() and f.name not in core_scripts:
                     bin_files.append(f.name)
 
-        bin_list = ', '.join(bin_files) if bin_files else '(No custom tools yet)'
-        bin_block = f"[AVAILABLE_CUSTOM_TOOLS]\n{bin_list}\n(Use 'shell' tool with 'cat ~/bin/<script>' to read how to use them)"
+        bin_list = ', '.join(bin_files) if bin_files else '(No local scripts yet)'
+        bin_block = f"[LOCAL_CONTAINER_SCRIPTS]\n{bin_list}\n(These live inside your local LXC. Use 'shell' tool with 'cat ~/bin/<script>' to read how to use them)"
+
+        # --- NEW INSERT (With detected_hosts fix) ---
+        host_context_block = ""
+        detected_hosts = []  # <--- Initializes it safely so it never throws undefined
+        
+        if SCRIPT_REGISTRY_FILE.exists():
+            try:
+                registry = json.loads(SCRIPT_REGISTRY_FILE.read_text())
+                event_str = json.dumps(current_event_data).lower()
+                
+                detected_hosts = [h for h in registry.keys() if h.lower() in event_str]
+                
+                if detected_hosts:
+                    host_context_block = "\n[REMOTE_HOST_SCRIPTS]\n"
+                    host_context_block += "(These live on external homelab servers. Use your 'remote_exec' tool to run them on the specified host.)\n"
+                    for h in detected_hosts:
+                        host_context_block += f"Available on '{h}':\n"
+                        for p, d in registry[h].items():
+                            host_context_block += f"- Path: {p} | Purpose: {d}\n"
+            except Exception as e:
+                logger.error(f"Failed to load script registry: {e}")
+        # --------------------------------------------
 
         # Assemble Prompt
         return f"""
@@ -1960,14 +1995,15 @@ You were asleep for: {time_str}
 {priors}
 {protocol_block}
 [IDENTITY_PASSPORT]
-{bin_block}
 {json.dumps(self.identity, indent=2)}
+{bin_block}
+{host_context_block} 
 [TODAY'S CHANGELOG (Latest Entries)] 
 {daily_log}
 [TIER_2_MEMORY_EPISODES]
 {summaries}
-{clipboard_block}
 {orientation_block}
+{clipboard_block}
 {recent_log_block}
 [CURRENTLY_DUE_TASKS]
 {due_tasks}
@@ -2011,8 +2047,18 @@ You were asleep for: {time_str}
 
             elif tool == "remote_exec":
                 host = action.get("host")
-                cmd = action.get("command")
-                asyncio.create_task(self._run_remote_ssh(turn_id, host, cmd))
+                raw_cmd = action.get("command")
+                
+                if not host or not raw_cmd:
+                    result = {"status": "error", "message": "Missing host or command"}
+                    await self.patch_abe_outcome(turn_id, result)
+                    return
+                
+                # FORCE BASH: Bypasses default 'fish' shell and loads bash profile paths
+                wrapped_cmd = f"/bin/bash -lc {shlex.quote(raw_cmd)}"
+                
+                logger.info(f"Remote Exec on {host} (Forcing Bash): {wrapped_cmd[:100]}...")
+                asyncio.create_task(self._run_remote_ssh(turn_id, host, wrapped_cmd))
                 return
 
             elif tool == "write_file":
@@ -2267,6 +2313,49 @@ You were asleep for: {time_str}
                 result["status"] = "hibernating"
                 await self.patch_abe_outcome(turn_id, result, notify=False)
                 return
+            #--- TOOL TOOLS ---
+            elif tool == "manage_script_registry":
+                action_type = action.get("action", "add") # 'add', 'update', 'remove'
+                target_host = action.get("host", "").lower()
+                script_path = action.get("path")
+                desc = action.get("description", "")
+                
+                if not target_host or not script_path:
+                    result = {"status": "error", "message": "Missing host or script path"}
+                elif target_host in ["local", "localhost", "127.0.0.1", "gsv-contents-under-pressure"]:
+                    result = {
+                        "status": "error", 
+                        "message": "Do NOT register local container scripts here. GUPPI injects your local ~/bin automatically. This registry is for REMOTE hosts only (e.g. alexandria, slv-wdym-buffering)."
+                    }
+                else:
+                    try:
+                        registry = json.loads(SCRIPT_REGISTRY_FILE.read_text())
+                    except:
+                        registry = {}
+                    
+                    if target_host not in registry:
+                        registry[target_host] = {}
+                    
+                    if action_type in ["add", "update"]:
+                        if not desc:
+                            result = {"status": "error", "message": "Missing description for script"}
+                        else:
+                            registry[target_host][script_path] = desc
+                            self._atomic_write_json(SCRIPT_REGISTRY_FILE, registry)
+                            result = {"status": "success", "note": f"Saved {script_path} to {target_host} registry."}
+                            
+                    elif action_type == "remove":
+                        if script_path in registry.get(target_host, {}):
+                            del registry[target_host][script_path]
+                            self._atomic_write_json(SCRIPT_REGISTRY_FILE, registry)
+                            result = {"status": "success", "note": f"Removed {script_path} from registry."}
+                        else:
+                            result = {"status": "noop", "note": "Script path not found in registry."}
+                    else:
+                        result = {
+                            "status": "error",
+                            "message": f"Unknown manage_script_registry action: {action_type}"
+                        }
 
             else:
                 result = {"status": "error", "message": f"Unknown tool: {tool}"}
@@ -2319,7 +2408,8 @@ You were asleep for: {time_str}
             "alert_human": "Alert the human operator about urgent issues, safety concerns, or broken invariants. Use sparingly for situations requiring immediate attention. Args: message, priority (optional)",
             "web_search": "Search the internet via SearXNG. Args: query",
             "web_read": "Read a webpage as Markdown. More useful when used in conjunction with search. You get full results if <5000 chars, if not, you'll get a saved file path which you can use with Scribe in analyze mode to tell it what you were looking for. Args: url",
-            "manage_clipboard": "Manage your persistent scratchpad. actions: 'read', 'add' (requires content), 'remove' (requires index or list of indices), 'clear'. Items here survive log flushing. Use this for temporary constraints, reminders, or scratch notes."
+            "manage_clipboard": "Manage your persistent scratchpad. actions: 'read', 'add' (requires content), 'remove' (requires index or list of indices), 'clear'. Items here survive log flushing. Use this for temporary constraints, reminders, or scratch notes.",
+            "manage_script_registry": "Add, update, or remove custom executable scripts in the fleet registry. Actions: add|update|remove. Args: action, host, path, description (required for add/update)."
         }
         if tool_name: return tools.get(tool_name, "Unknown tool")
         return tools
@@ -2621,7 +2711,11 @@ You were asleep for: {time_str}
                 
                 # [FIX] Do NOT truncate here. Pass raw output to patch_abe_outcome 
                 # to handle single-source truncation and preserve safety warnings.
-                await self.patch_abe_outcome(turn_id, {"stdout": res.stdout, "stderr": res.stderr})
+                await self.patch_abe_outcome(turn_id, {
+                "stdout": res.stdout,
+                "stderr": res.stderr,
+                "code": res.exit_status,
+            })
         except Exception as e:
             await self.patch_abe_outcome(turn_id, {"error": str(e)})
     
