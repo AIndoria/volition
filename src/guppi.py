@@ -611,9 +611,10 @@ class GuppiDaemon:
                 if isinstance(entry["content"], str):
                     new_entry["content"] = self._truncate_output(entry["content"], limit=char_limit)
 
-
+            
             # Helper to process text fields
             def _process_text(text, suffix=""):
+                text = self._truncate_output(text, limit=char_limit, label=suffix.strip("-") or "history")
                 if len(text) <= char_limit: return text
                 # Deterministic Filename (Turn ID + Suffix)
                 safe_name = f"{turn_id}{suffix}.txt"
@@ -950,11 +951,16 @@ class GuppiDaemon:
         
         if isinstance(truncated_results, dict):
             for k in ["stdout", "stderr"]:
-                if isinstance(truncated_results.get(k), str) and len(truncated_results[k]) > MAX_OUT_LEN:
-                    original_len = len(truncated_results[k])
-                    head = truncated_results[k][:MAX_OUT_LEN]
-                    truncated_results[k] = (
-                        f"{head}\n... [TRUNCATED BY GUPPI SAFETY: {original_len - MAX_OUT_LEN} chars removed] ..."
+                if isinstance(truncated_results.get(k), (str, bytes)):
+                    truncated_results[k] = self._decode_tool_output(
+                        truncated_results[k],
+                        k,
+                        prepatch_cap=MAX_OUT_LEN,
+                    )
+                    truncated_results[k] = self._truncate_output(
+                        truncated_results[k],
+                        limit=MAX_OUT_LEN,
+                        label=k,
                     )
         # ----------------------------------------
         found = False
