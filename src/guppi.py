@@ -298,13 +298,118 @@ class GuppiDaemon:
         logger.info(f"GUPPI v8.0.0-rc2 Initialized for {self.abe_name}")
     
         # --- The Machete Helper ---
-    def _truncate_output(self, text: str, limit: int = 20000) -> str:
-        """Surgical tool to prevent context flooding from massive logs."""
-        if not isinstance(text, str): return text
+    def _looks_control_heavy_text(self, text: str, sample_size: int = 4096) -> tuple[bool, dict]:
+        """Detect text that will explode when JSON-escaped, e.g. binary journals full of NULs."""
+        sample = text[:sample_size]
+        if not sample:
+            return False, {"sample_len": 0, "nul_count": 0, "control_count": 0, "control_ratio": 0.0}
+
+        nul_count = sample.count("\x00")
+        control_count = sum(
+            1 for ch in sample
+            if ord(ch) < 32 and ch not in ("\n", "\r", "\t")
+        )
+        control_ratio = control_count / max(len(sample), 1)
+
+        is_bad = nul_count > 0 or control_ratio > 0.05
+
+        return is_bad, {
+            "sample_len": len(sample),
+            "nul_count": nul_count,
+            "control_count": control_count,
+            "control_ratio": round(control_ratio, 4),
+        }
+
+    def _looks_control_heavy_bytes(self, data: bytes, sample_size: int = 4096) -> tuple[bool, dict]:
+        """Detect binary/control-heavy bytes before decode and JSON escaping."""
+        sample = data[:sample_size]
+        if not sample:
+            return False, {"sample_len": 0, "nul_count": 0, "control_count": 0, "control_ratio": 0.0}
+
+        nul_count = sample.count(b"\x00")
+        control_count = sum(
+            1 for b in sample
+            if b < 32 and b not in (9, 10, 13)
+        )
+        control_ratio = control_count / max(len(sample), 1)
+
+        is_bad = nul_count > 0 or control_ratio > 0.05
+
+        return is_bad, {
+            "sample_len": len(sample),
+            "nul_count": nul_count,
+            "control_count": control_count,
+            "control_ratio": round(control_ratio, 4),
+        }
+
+    def _binary_suppression_notice(self, label: str, total_len: int | None, stats: dict) -> str:
+        size = f"{total_len} bytes/chars" if total_len is not None else "unknown size"
+        return (
+            f"[BINARY / CONTROL-HEAVY {label.upper()} SUPPRESSED BY GUPPI SAFETY]\n"
+            f"Hey, this is an automated thing set up by THE Abe -- Whatever you're trying, "
+            f"the output looks binary or control-heavy and would expand dangerously when JSON-escaped.\n"
+            f"Size: {size}; sample={stats}\n"
+            "This commonly happens when tail/cat is used on binary files like systemd .journal files. "
+            "Use a decoder/filter instead: journalctl --file=..., strings, grep, tail/head on decoded text, "
+            "or spawn a scribe with a specific task if you need analysis over the whole file."
+        )
+
+    def _truncate_output(self, text: str, limit: int = 20000, label: str = "output") -> str:
+        """Surgical tool to prevent context flooding from massive logs and JSON-escape bombs."""
+        if not isinstance(text, str):
+            return text
+
+        is_bad, stats = self._looks_control_heavy_text(text)
+        if is_bad:
+            return self._binary_suppression_notice(label, len(text), stats)
+
         if len(text) <= limit:
             return text
+
         cut_size = len(text) - limit
-        return text[:limit] + f"\n... [Hey this is an automated thing set up by THE Abe -- Whatever you're trying, it was flagged because you're trying to spend more than {limit} chars this turn. This is unadvised. Try to reduce the intake. Original Err Message: TRUNCATED BY GUPPI SAFETY {cut_size} chars removed. Spawn a scribe with a specific task if you want to go over the entire file, or grep selectively (if you are certain what you're looking for) to read remainder.] ..."
+        return (
+            text[:limit]
+            + f"\n... [Hey this is an automated thing set up by THE Abe -- "
+              f"Whatever you're trying, it was flagged because you're trying to spend more than "
+              f"{limit} chars this turn. This is unadvised. Try to reduce the intake. "
+              f"Original Err Message: TRUNCATED BY GUPPI SAFETY {cut_size} chars removed. "
+              f"Spawn a scribe with a specific task if you want to go over the entire file, "
+              f"or grep selectively (if you are certain what you're looking for) to read remainder.] ..."
+        )
+
+    def _decode_tool_output(self, raw: bytes | str | None, label: str, prepatch_cap: int = 100000) -> str:
+        """
+        Convert subprocess/SSH output into text safely before it ever reaches
+        working.log, Redis, inbox, or json.dumps().
+        """
+        if raw is None:
+            return ""
+
+        if isinstance(raw, bytes):
+            is_bad, stats = self._looks_control_heavy_bytes(raw)
+            if is_bad:
+                return self._binary_suppression_notice(label, len(raw), stats)
+
+            text = raw.decode("utf-8", errors="replace")
+        else:
+            text = str(raw)
+
+        is_bad, stats = self._looks_control_heavy_text(text)
+        if is_bad:
+            return self._binary_suppression_notice(label, len(text), stats)
+
+        if len(text) > prepatch_cap:
+            cut_size = len(text) - prepatch_cap
+            return (
+                text[:prepatch_cap]
+                + f"\n... [Hey this is an automated thing set up by THE Abe -- "
+                  f"Whatever you're trying, this tool output exceeded the pre-patch hard cap "
+                  f"of {prepatch_cap} chars before it could safely enter the log/Redis path. "
+                  f"Original Err Message: HARD CAP PRE-PATCH {cut_size} chars removed. "
+                  f"Use grep/tail/head, decode binary formats first, or spawn a scribe with a specific task.] ..."
+            )
+
+        return text
     
     def _atomic_write_json(self, path: Path, data: dict):
         """Safely writes JSON to avoid corruption during simultaneous Abe updates."""
@@ -324,17 +429,9 @@ class GuppiDaemon:
                 proc.kill()
                 stdout, stderr = await proc.communicate()
             
-            # [FIX] 7.8: Source Truncation (The Machete)
-            # We truncate BEFORE creating the results dict to ensure the dirty payload never hits Redis.
-            stdout_str = stdout.decode() if stdout else ""
-            stderr_str = stderr.decode() if stderr else ""
-            
-            
-            # NOTE: We assume patch_abe_outcome handles the truncation to avoid double-logging
-            # the truncation message, BUT we truncate massive buffers here solely to avoid 
-            # crashing Python memory if it's GBs size.
-            if len(stdout_str) > 100000: stdout_str = stdout_str[:100000] + "... [HARD CAP PRE-PATCH] ..."
-            if len(stderr_str) > 100000: stderr_str = stderr_str[:100000] + "... [HARD CAP PRE-PATCH] ..."
+            # 8.1: Decode outputs safely with pre-patch cap to prevent memory issues and log flooding
+            stdout_str = self._decode_tool_output(stdout, "stdout")
+            stderr_str = self._decode_tool_output(stderr, "stderr")
 
             results = {"stdout": stdout_str, "stderr": stderr_str, "code": proc.returncode}
             await self.patch_abe_outcome(turn_id, results)
