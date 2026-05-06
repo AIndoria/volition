@@ -306,12 +306,13 @@ class GuppiDaemon:
 
         nul_count = sample.count("\x00")
         control_count = sum(
+        control_count = sum(
             1 for ch in sample
-            if ord(ch) < 32 and ch not in ("\n", "\r", "\t")
+            if ch != "\x00" and ord(ch) < 32 and ch not in ("\n", "\r", "\t")
         )
         control_ratio = control_count / max(len(sample), 1)
 
-        is_bad = nul_count > 0 or control_ratio > 0.05
+        is_bad = nul_count > 0 or (control_count >= 32 and control_ratio > 0.05)
 
         return is_bad, {
             "sample_len": len(sample),
@@ -329,11 +330,11 @@ class GuppiDaemon:
         nul_count = sample.count(b"\x00")
         control_count = sum(
             1 for b in sample
-            if b < 32 and b not in (9, 10, 13)
+            if b != 0 and b < 32 and b not in (9, 10, 13)
         )
         control_ratio = control_count / max(len(sample), 1)
 
-        is_bad = nul_count > 0 or control_ratio > 0.05
+        is_bad = nul_count > 0 or (control_count >= 32 and control_ratio > 0.05)
 
         return is_bad, {
             "sample_len": len(sample),
