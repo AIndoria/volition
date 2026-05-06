@@ -2347,6 +2347,8 @@ You were asleep for: {time_str}
                     elif action_type == "remove":
                         if script_path in registry.get(target_host, {}):
                             del registry[target_host][script_path]
+                            if not registry[target_host]:
+                                del registry[target_host]
                             self._atomic_write_json(SCRIPT_REGISTRY_FILE, registry)
                             result = {"status": "success", "note": f"Removed {script_path} from registry."}
                         else:
