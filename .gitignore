@@ -9,6 +9,7 @@ venv/
 # Runtime artifacts
 .env
 .env.*
+!.env.example
 *.log
 *.db
 *.sqlite
