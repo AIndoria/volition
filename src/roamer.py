@@ -367,7 +367,8 @@ PROTOCOL:
                 "source": "roamer",
                 "target": self.shell.target_host,
                 "parent_turn_id": self.parent_turn_id,
-            }
+            },
+            "from": "roamer",
         }
 
         if self.debug_mode:

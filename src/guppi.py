@@ -256,7 +256,10 @@ class Clipboard:
         if not new_items:
             return "No content provided."
 
-        idx = self._coerce_index(index)
+        try:
+            idx = self._coerce_index(index)
+        except ValueError as e:
+            return str(e)
         zero_idx = min(idx - 1, len(lines))
         lines[zero_idx:zero_idx] = new_items
 
@@ -270,7 +273,11 @@ class Clipboard:
         if not new_items:
             return "No replacement content provided."
 
-        idx = self._coerce_index(index)
+        try:
+            idx = self._coerce_index(index)
+        except ValueError as e:
+            return str(e)
+
         zero_idx = idx - 1
 
         if zero_idx >= len(lines):
@@ -282,7 +289,11 @@ class Clipboard:
 
     def mark(self, index: int, status: str = "DONE") -> str:
         lines = self._read_lines()
-        idx = self._coerce_index(index)
+        try:
+            idx = self._coerce_index(index)
+        except ValueError as e:
+            return str(e)
+
         zero_idx = idx - 1
 
         if zero_idx >= len(lines):
@@ -862,7 +873,10 @@ class GuppiDaemon:
             norm["observed"]["raw"] = data
             norm["observed"]["event_type"] = data.get("event_type", data.get("event"))
             norm["observed"]["from"] = data.get("from")
-            norm["observed"]["meta"] = data.get("meta", {})
+            meta = data.get("meta", {})
+            if not isinstance(meta, dict):
+                meta = {}
+            norm["observed"]["meta"] = meta
             norm["observed"]["content"] = data.get("content") or data.get("results")
 
             # --- [FIX] ROBUST ACTION_ID EXTRACTION ---
@@ -1752,6 +1766,30 @@ class GuppiDaemon:
                 logger.error(f"Main Loop Error: {e}")
                 await asyncio.sleep(5)
 
+    def _extract_original_event(self, event_data: Any) -> Optional[str]:
+        """Safely extracts the original event name from nested trigger payloads.
+
+        Some inbox payloads carry payload.raw as a string, not a dict. This helper
+        prevents AttributeError from chains like payload.get("raw", {}).get("event").
+        """
+        if not isinstance(event_data, dict):
+            return None
+
+        payload = event_data.get("payload") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        raw_payload = payload.get("raw") or {}
+        if not isinstance(raw_payload, dict):
+            raw_payload = {}
+
+        return (
+            payload.get("event_type")
+            or payload.get("event")
+            or raw_payload.get("event")
+            or event_data.get("event")
+        )
+
     # --- COGNITION (Atomic + Governor) ---
 
     async def run_think_cycle(self, event_data, parent_evt_id, force_model=None, system_notice=None, orientation_data=None, retry_count=0):
@@ -1761,14 +1799,8 @@ class GuppiDaemon:
         # --- 1. URGENCY CHECK (ROBUST) ---
         is_urgent = False
 
-        payload = event_data.get("payload", {})
         # [FIX] Check all layers of the payload for the event signature
-        original_event = (
-            payload.get("event_type")
-            or payload.get("event")
-            or payload.get("raw", {}).get("event")
-            or event_data.get("event") # Fallback to envelope
-        )
+        original_event = self._extract_original_event(event_data)
 
         # A. Emergency Channel
         if event_data.get("channel") == "chat:synchronous": is_urgent = True
@@ -1796,10 +1828,14 @@ class GuppiDaemon:
         try:
             event_type = event_data.get("event")
 
-            # Check if this is a direct email rather than a system inbox event
-            payload_event_type = event_data.get("payload", {}).get("event_type", "")
-            is_human_email = (event_type == "Inbox" and payload_event_type == "NewInboxMessage")
+            # Check if this is a direct email rather than a system inbox event.
+            # Payload may be a raw string for malformed/plain inbox items, so normalize first.
+            payload = event_data.get("payload") or {}
+            if not isinstance(payload, dict):
+                payload = {}
 
+            payload_event_type = payload.get("event_type", "")
+            is_human_email = (event_type == "Inbox" and payload_event_type == "NewInboxMessage")
             is_chat = (event_type == "Chat")
 
             if force_model is not None:
@@ -1903,13 +1939,7 @@ class GuppiDaemon:
             logger.error(f"LLM Call Failed: {msg}")
             await self.log_abe_intent(f"fail-{uuid.uuid4()}", parent_evt_id, f"Error: {msg}", {"tool": "hibernate"})
 
-            payload = event_data.get("payload", {}) or {}
-            original_event = (
-                payload.get("event_type")
-                or payload.get("event")
-                or payload.get("raw", {}).get("event")
-                or event_data.get("event")
-            )
+            original_event = self._extract_original_event(event_data)
 
             if original_event != "CrashReport":
                 error_msg = {
@@ -1930,13 +1960,7 @@ class GuppiDaemon:
             logger.error(f"LLM Call Failed [{err_type}]: {err_msg}")
             await self.log_abe_intent(f"fail-{uuid.uuid4()}", parent_evt_id, f"Error [{err_type}]: {err_msg}", {"tool": "hibernate"})
 
-            payload = event_data.get("payload", {}) or {}
-            original_event = (
-                payload.get("event_type")
-                or payload.get("event")
-                or payload.get("raw", {}).get("event")
-                or event_data.get("event")
-            )
+            original_event = self._extract_original_event(event_data)
 
             if original_event != "CrashReport":
                 error_msg = {
@@ -2122,6 +2146,17 @@ class GuppiDaemon:
                     parsed = candidates[0]
                 else:
                     raise LLMOutputError("Ambiguous or invalid JSON array from LLM")
+
+            if not isinstance(parsed, dict):
+                raise LLMOutputError(
+                    f"LLM returned valid JSON but not an object: {type(parsed).__name__}"
+                )
+
+            if "action" not in parsed:
+                raise LLMOutputError("LLM JSON object missing required 'action' key")
+
+            if not isinstance(parsed.get("action"), dict):
+                raise LLMOutputError("LLM 'action' must be a JSON object")
 
             # Active Decontamination
             keys_to_scrub = ["thought_signature", "thoughtSignature"]
@@ -2497,12 +2532,36 @@ You were asleep for: {time_str}
 
                     # 2. Inject target file content
                     if prompt_file_path:
-                        p_path = Path(prompt_file_path)
-                        if p_path.exists():
+                        p_path = Path(prompt_file_path).expanduser()
+
+                        if not p_path.exists():
+                            result = {
+                                "status": "error",
+                                "message": (
+                                    f"Prompt file not found in local LXC: {prompt_file_path}. "
+                                    "spawn_scribe can only read local files inside the Abe container. "
+                                    "For remote files, use remote_exec to extract/decode the relevant text first, "
+                                    "write that text to a local temp file, then spawn_scribe on the local file."
+                                )
+                            }
+                            await self.patch_abe_outcome(turn_id, result)
+                            return
+
+                        try:
                             file_content = p_path.read_text(encoding="utf-8")
-                            combined_content += f"--- FILE CONTENT ({prompt_file_path}) ---\n{file_content}\n"
-                        else:
-                            combined_content += f"--- FILE MISSING: {prompt_file_path} ---\n"
+                        except UnicodeDecodeError:
+                            result = {
+                                "status": "error",
+                                "message": (
+                                    f"Prompt file is not valid UTF-8 text: {prompt_file_path}. "
+                                    "If this is a binary journal, decode it first with journalctl --file "
+                                    "and pass the decoded text to Scribe."
+                                )
+                            }
+                            await self.patch_abe_outcome(turn_id, result)
+                            return
+
+                        combined_content += f"--- FILE CONTENT ({prompt_file_path}) ---\n{file_content}\n"
 
                     # 3. Create temp file for the Scribe process
                     with tempfile.NamedTemporaryFile('w', delete=False) as pf:
