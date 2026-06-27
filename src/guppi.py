@@ -2766,7 +2766,7 @@ You were asleep for: {time_str}
             elif tool == "spawn_roamer":
                 directive = action.get("directive")
                 target_host = action.get("target_host", "local")
-                target_url = os.environ.get("ROAMER_API_URL", "http://127.0.0.1:8081/v1")
+                target_url = os.environ.get("ROAMER_API_URL", "http://127.0.0.1:8080/v1")
                 roamer_model = os.environ.get("MODEL_ROAMER", "local/gemma4-26b-a4b")
 
                 if not directive:
@@ -2809,13 +2809,13 @@ You were asleep for: {time_str}
                 # Enforce routing rules based on the Genesis prompt promises
                 if mode == "analyze":
                     model = os.environ.get("MODEL_SCRIBE", "local/nanbeige-4.1-3B")
-                    target_url = os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:11434/v1")
+                    target_url = os.environ.get("SCRIBE_API_URL", "http://127.0.0.1:8080/v1")
                 elif mode == "summarize":
                     model = os.environ.get("MODEL_SUMMARIZE", "local/mistral")
-                    target_url = os.environ.get("SUMMARIZE_API_URL", "http://127.0.0.1:11434/v1")
+                    target_url = os.environ.get("SUMMARIZE_API_URL", "http://127.0.0.1:8080/v1")
                 else:
                     model = MODEL_FLASH # Fallback just in case
-                    target_url = os.environ.get("FLASH_API_URL", "http://127.0.0.1:8081/v1")
+                    target_url = os.environ.get("FLASH_API_URL", "http://127.0.0.1:8080/v1")
 
                 # v6.5: Intercept Vectorize requests
                 # BRANCH 1: VECTORIZATION (GPU Offload)
