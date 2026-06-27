@@ -93,6 +93,19 @@ MODEL_PRO = os.environ.get("MODEL_PRO", "google/gemini-3-flash-preview:thinking"
 MODEL_FLASH = os.environ.get("MODEL_FLASH", "google/gemini-3-flash-preview")
 MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "local/mistral")
 
+# Qwen3.6 preserve-thinking support.
+# - auto: enabled only for Qwen 3.6-family model names.
+# - off: never enabled
+# - on/force/always: enabled regardless of model name for local experiments
+PRESERVE_THINKING_MODE = os.environ.get("GUPPI_PRESERVE_THINKING", "auto").strip().lower()
+
+try:
+    PRESERVE_THINKING_TURNS = int(os.environ.get("GUPPI_PRESERVE_THINKING_TURNS", "4"))
+except (TypeError, ValueError):
+    PRESERVE_THINKING_TURNS = 4
+PRESERVE_THINKING_TURNS = max(0, min(PRESERVE_THINKING_TURNS, 8))
+
+
 # v7.0: Social Stream Config
 SOCIAL_DIGEST_STREAM = "volition:social_digests"
 
@@ -765,6 +778,20 @@ class GuppiDaemon:
             char_limit = 50000 if is_most_recent else 1000
 
             new_entry = entry.copy()
+
+            # Preserve-thinking traces can be very large and should not be
+            # injected into the normal visible [WORKING_MEMORY_LOG]. Qwen3.6
+            # gets them through messages[].reasoning_content instead.
+            if "thought_signature" in new_entry:
+                sig = new_entry.get("thought_signature")
+                if isinstance(sig, str) and sig:
+                    new_entry["thought_signature"] = (
+                        f"[PRESERVED_THINKING_STORED: {len(sig)} chars; "
+                        "omitted from visible working-memory context]"
+                    )
+                else:
+                    new_entry.pop("thought_signature", None)
+
             res = new_entry.get("results")
             turn_id = new_entry.get("id", "unknown")
 
@@ -1803,6 +1830,118 @@ class GuppiDaemon:
             or event_data.get("event")
         )
 
+    def _model_name_blob(self, *model_names: Any) -> str:
+        """Builds a loose searchable model-name blob for capability gates."""
+        chunks = []
+        for name in model_names:
+            if not name:
+                continue
+
+            raw = str(name).strip().lower()
+            if not raw:
+                continue
+
+            chunks.append(raw)
+            chunks.append(
+                raw.replace("/", " ")
+                   .replace(":", " ")
+                   .replace("_", " ")
+                   .replace("-", " ")
+            )
+
+        return " ".join(chunks)
+
+    def _is_qwen36_model(self, *model_names: Any) -> bool:
+        """True for Qwen 3.6-ish model names, false for Qwen3.5/Gemma/MiMo/etc."""
+        blob = self._model_name_blob(*model_names)
+        if "qwen" not in blob:
+            return False
+
+        # Covers names like:
+        # - local/Qwen3.6-27B:thinking
+        # - Qwen3.6-27B
+        # - qwen36
+        # - qwen 3 6
+        return any(marker in blob for marker in ("3.6", "3 6", "36"))
+
+    def _preserve_thinking_enabled(self, *model_names: Any) -> bool:
+        """Public-repo safe gate for reasoning_content history reconstruction."""
+        mode = PRESERVE_THINKING_MODE
+
+        if mode in {"0", "false", "off", "no", "disabled", "disable"}:
+            return False
+
+        if mode in {"1", "true", "on", "yes", "force", "always", "enabled", "enable"}:
+            return True
+
+        # Default: auto-enable only for Qwen3.6 family models.
+        return self._is_qwen36_model(*model_names)
+
+    def _build_preserved_thinking_messages(
+        self,
+        current_prompt: str,
+        model_id: str,
+        history_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Builds OpenAI-compatible chat messages for Qwen3.6 preserve_thinking.
+
+        Assistant messages remain the same ReAct JSON objects GUPPI already expects,
+        with native reasoning placed in reasoning_content for Qwen's chat template.
+        """
+        limit = PRESERVE_THINKING_TURNS if history_limit is None else int(history_limit)
+
+        if limit <= 0 or not self._preserve_thinking_enabled(model_id):
+            return [{"role": "user", "content": current_prompt}]
+
+        preserved_turns = []
+        for entry in self.log_buffer:
+            if entry.get("type") != "AbeTurn":
+                continue
+            if entry.get("status") != "completed":
+                continue
+            if not isinstance(entry.get("action"), dict):
+                continue
+
+            thought_sig = entry.get("thought_signature")
+            if not isinstance(thought_sig, str) or not thought_sig.strip():
+                continue
+
+            preserved_turns.append(entry)
+
+        preserved_turns = preserved_turns[-limit:]
+
+        messages: List[Dict[str, Any]] = []
+
+        for entry in preserved_turns:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[PREVIOUS_GUPPI_TURN_CONTEXT]\n"
+                    "Compact anchor for the following preserved assistant turn. "
+                    "Do not treat this as a separate task. Tool results and event "
+                    "details are provided through [WORKING_MEMORY_LOG] in the "
+                    "current prompt when still hot.\n"
+                    f"turn_id: {entry.get('id', 'unknown')}\n"
+                    f"parent_event_id: {entry.get('parent_event_id', 'unknown')}\n"
+                    f"timestamp_intent: {entry.get('timestamp_intent', '')}\n"
+                    f"timestamp_outcome: {entry.get('timestamp_outcome', '')}"
+                ),
+            })
+
+            assistant_json = {
+                "reasoning": entry.get("reasoning", ""),
+                "action": entry.get("action", {"tool": "hibernate"}),
+            }
+
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps(assistant_json, ensure_ascii=False),
+                "reasoning_content": entry["thought_signature"],
+            })
+
+        messages.append({"role": "user", "content": current_prompt})
+        return messages
+
     # --- COGNITION (Atomic + Governor) ---
 
     async def run_think_cycle(self, event_data, parent_evt_id, force_model=None, system_notice=None, orientation_data=None, retry_count=0):
@@ -1875,23 +2014,56 @@ class GuppiDaemon:
                   missed = await self._sync_social_history(self.last_social_sync_ts, now)
                   orientation_data = {"time_asleep": delta, "missed_digests": missed}
                   self.last_social_sync_ts = now
+
             context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data)
-            # --- ADD THIS DEBUG DUMP ---
-            if os.environ.get("GUPPI_DUMP_PROMPT") == "1":
+            messages = None
+            if self._preserve_thinking_enabled(model):
+                messages = self._build_preserved_thinking_messages(context, model)
+                logger.info(
+                    "Preserve-thinking enabled for %s with %d message(s)",
+                    model,
+                    len(messages),
+                )
+
+            # --- DEBUG DUMP ---
+            dump_prompt_enabled = (
+                os.environ.get("GUPPI_DUMP_PROMPT") == "1"
+                or os.environ.get("GUPPI_PROMPT_DUMP") == "1"
+            )
+
+            if dump_prompt_enabled:
                 dump_path = ABE_ROOT / "logs" / f"prompt_dump_{int(time.time())}.txt"
                 dump_path.parent.mkdir(parents=True, exist_ok=True)
                 dump_path.write_text(context, encoding="utf-8")
                 logger.warning(f"⚠️ Dumped {len(context)} char context payload to {dump_path}")
+
+                if messages is not None:
+                    msg_dump_path = ABE_ROOT / "logs" / f"prompt_messages_dump_{int(time.time())}.json"
+                    msg_dump_path.write_text(json.dumps(messages, indent=2, ensure_ascii=False), encoding="utf-8")
+                    logger.warning(f"⚠️ Dumped {len(messages)} chat message(s) to {msg_dump_path}")
             # ---------------------------
             # [7.8.1] RETRY LOGIC WRAPPER
             try:
-                response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
+                response_payload = await self.call_abe_api(
+                    context,
+                    model_id=model,
+                    api_url=target_url,
+                    messages=messages,
+                )
             except ContextLengthExceededError:
                 logger.warning(f"Context window shattered ({model}). Engaging Panic Mode (dropping oldest memories) and retrying.")
 
                 # Rebuild context with panic_mode=True
                 context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data, panic_mode=True)
-                response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
+                messages = None
+                if self._preserve_thinking_enabled(model):
+                    messages = self._build_preserved_thinking_messages(context, model)
+                response_payload = await self.call_abe_api(
+                    context,
+                    model_id=model,
+                    api_url=target_url,
+                    messages=messages,
+                )
             except LLMOutputError as e:
                 if retry_count < 1:
                     logger.warning(f"⚠️ Malformed JSON from {model}. Escalating to PRO for repair.")
@@ -1913,12 +2085,15 @@ class GuppiDaemon:
                     )
                 else:
                     # We failed twice. Stop the bleeding.
+                    # In future versions, I plan to add a small "JSON repair" LLM chain that will try to fix broken JSON, and only that.
                     logger.error(f"❌ JSON Repair failed after retry. Giving up.")
                     response_payload = {"reasoning": "JSON Repair Failed twice. Safety Shutdown.", "action": {"tool": "hibernate"}}
 
+            native_reasoning = response_payload.pop("_native_reasoning_content", None)
+
             reasoning = response_payload.get("reasoning", "No reasoning provided.")
             action = response_payload.get("action", {"tool": "hibernate"})
-            thought_sig = response_payload.get("thoughtSignature")
+            thought_sig = native_reasoning or response_payload.get("thoughtSignature")
             tool = action.get("tool")
 
             # Implicit Escalation
@@ -2001,15 +2176,30 @@ class GuppiDaemon:
                 try: await self.r.lpush(f"inbox:{self.abe_name}", json.dumps(alert))
                 except: pass
 
-    async def call_abe_api(self, prompt_text: str, model_id: str = GEMINI_MODEL, api_url: str = None) -> Dict:
+    async def call_abe_api(
+        self,
+        prompt_text: str,
+        model_id: str = GEMINI_MODEL,
+        api_url: str = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict:
         # Everything routes through the OpenAI-compatible endpoint now
-        return await self._call_openai_compat(model_id, prompt_text, api_url)
+        return await self._call_openai_compat(
+            model_id,
+            prompt_text,
+            api_url,
+            messages=messages,
+        )
 
-    async def _call_openai_compat(self, model_id, prompt, api_url=None):
+    async def _call_openai_compat(self, model_id, prompt, api_url=None, messages=None):
+        original_model_id = str(model_id)
+
         # 1. Detect Thinking Intent
-        use_thinking = ":thinking" in model_id
+        use_thinking = ":thinking" in original_model_id
         if use_thinking:
-            model_id = model_id.split(":")[0]
+            model_id = original_model_id.split(":")[0]
+        else:
+            model_id = original_model_id
 
         # 2. Split-Brain Routing (Local vs Remote)
         if model_id.startswith("local/"):
@@ -2051,28 +2241,47 @@ class GuppiDaemon:
         except:
             target_top_k = 40
 
+        preserve_thinking = self._preserve_thinking_enabled(original_model_id, actual_model)
+        model_name_blob = self._model_name_blob(original_model_id, actual_model)
+
         payload = {
             "model": actual_model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages or [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
             "temperature": target_temp,
             "top_p": target_top_p
         }
-        model_name_lower = actual_model.lower()
 
-        if "qwen" in model_name_lower:
-            # Qwen Model Card: Needs strict penalties to prevent <think> loops
+        if self._is_qwen36_model(original_model_id, actual_model):
+            # Qwen3.6 model-card defaults for thinking mode.
+            # Does not inherit Qwen3.5's high presence penalty here.
             payload.update({
                 "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "repetition_penalty": 1.0
+            })
+
+            if preserve_thinking:
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": True,
+                    "preserve_thinking": True,
+                }
+
+        elif "qwen" in model_name_blob:
+            # Qwen3.5 / older Qwen behavior. Keeping the old stricter penalty path.
+            payload.update({
+                "top_k": 20,
+                "min_p": 0.0,
                 "presence_penalty": 1.5,
                 "repetition_penalty": 1.0
             })
 
-        elif "gemma" in model_name_lower:
+        elif "gemma" in model_name_blob:
             # Gemma Model Card: Standardized sampling for best performance
             payload.update({
                 "top_k": 64,
-                "presence_penalty": 0.0,    # Gemma doesn't require high presence penalty
+                "presence_penalty": 0.0,
                 "repetition_penalty": 1.0
             })
 
@@ -2138,8 +2347,15 @@ class GuppiDaemon:
                         ts = datetime.utcnow().isoformat()
                         f.write(f"\n--- [THOUGHT BURST: {ts}] ---\n{reasoning}\n--- [END] ---\n")
 
-                # 4. Pass the pristine JSON to the cleaner
-                return self._clean_json(text, thought_sig=None)
+                # 4. Pass the pristine JSON to the cleaner.
+                # GUPPI owns native reasoning preservation; the model is not
+                # allowed to smuggle thoughtSignature inside its JSON.
+                parsed = self._clean_json(text, thought_sig=None)
+
+                if preserve_thinking and reasoning:
+                    parsed["_native_reasoning_content"] = reasoning
+
+                return parsed
 
     def _clean_json(self, text_response, thought_sig=None):
         try:
