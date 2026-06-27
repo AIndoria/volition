@@ -427,6 +427,7 @@ class GuppiDaemon:
         self._bg_tasks: List[asyncio.Task] = []
         self._is_pruning = False
         self.pending_vector_tasks = {}
+        self.preserved_thinking_cache: Dict[str, str] = {}
         self._prune_started_at = 0.0
         self._current_prune_id = None
         self.SCRIBE_SUCCESS_EVENTS = {"TaskCompleted", "ScribeResult"} # this is what happens when code evolves more than the plandocs
@@ -1902,8 +1903,23 @@ class GuppiDaemon:
             if not isinstance(entry.get("action"), dict):
                 continue
 
-            thought_sig = entry.get("thought_signature")
-            if not isinstance(thought_sig, str) or not thought_sig.strip():
+            turn_id = entry.get("id")
+            if not turn_id:
+                continue
+
+            thought_sig = self._load_preserved_thinking(turn_id)
+
+            # Backward compatibility for old logs created before sidecar storage.
+            if not thought_sig:
+                old_sig = entry.get("thought_signature")
+                if (
+                    isinstance(old_sig, str)
+                    and old_sig.strip()
+                    and not old_sig.startswith("[PRESERVED_THINKING_STORED:")
+                ):
+                    thought_sig = old_sig
+
+            if not thought_sig:
                 continue
 
             preserved_turns.append(entry)
@@ -1933,14 +1949,94 @@ class GuppiDaemon:
                 "action": entry.get("action", {"tool": "hibernate"}),
             }
 
+            turn_id = entry.get("id", "")
+            thought_sig = self._load_preserved_thinking(turn_id)
+
+            # Backward compatibility for old logs created before sidecar storage.
+            if not thought_sig:
+                old_sig = entry.get("thought_signature")
+                if (
+                    isinstance(old_sig, str)
+                    and old_sig.strip()
+                    and not old_sig.startswith("[PRESERVED_THINKING_STORED:")
+                ):
+                    thought_sig = old_sig
+
             messages.append({
                 "role": "assistant",
                 "content": json.dumps(assistant_json, ensure_ascii=False),
-                "reasoning_content": entry["thought_signature"],
+                "reasoning_content": thought_sig,
             })
 
         messages.append({"role": "user", "content": current_prompt})
         return messages
+
+    def _preserved_thinking_dir(self) -> Path:
+        path = LOGS_DIR / "thoughts" / "by_turn"
+
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _preserved_thinking_path(self, turn_id: str) -> Path:
+        safe_turn = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(turn_id))
+        return self._preserved_thinking_dir() / f"{safe_turn}.json"
+
+    def _store_preserved_thinking(self, turn_id: str, reasoning_content: str) -> str:
+        """Store native model reasoning outside working.log.
+
+        working.log gets only a placeholder/ref. The raw trace is kept in a
+        private sidecar used for Qwen3.6 preserve-thinking reconstruction.
+        """
+        if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+            return ""
+
+        self.preserved_thinking_cache[turn_id] = reasoning_content
+
+        payload = {
+            "turn_id": turn_id,
+            "agent": self.abe_name,
+            "created_at": datetime.utcnow().isoformat(),
+            "chars": len(reasoning_content),
+            "reasoning_content": reasoning_content,
+        }
+
+        path = self._preserved_thinking_path(turn_id)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=str(path.parent),
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            json.dump(payload, tf, ensure_ascii=False)
+            tf.write("\n")
+            temp_path = Path(tf.name)
+
+        os.replace(temp_path, path)
+
+        return (
+            f"[PRESERVED_THINKING_STORED: {len(reasoning_content)} chars; "
+            f"ref={path.name}; omitted from working.log visible audit]"
+        )
+
+    def _load_preserved_thinking(self, turn_id: str) -> str:
+        cached = self.preserved_thinking_cache.get(turn_id)
+        if cached:
+            return cached
+
+        path = self._preserved_thinking_path(turn_id)
+        if not path.exists():
+            return ""
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            content = data.get("reasoning_content", "")
+            if isinstance(content, str) and content:
+                self.preserved_thinking_cache[turn_id] = content
+                return content
+        except Exception as e:
+            logger.warning(f"Failed to load preserved thinking for {turn_id}: {e}")
+
+        return ""
 
     # --- COGNITION (Atomic + Governor) ---
 
@@ -2115,6 +2211,10 @@ class GuppiDaemon:
                 return
 
             turn_id = f"turn-{uuid.uuid4()}"
+
+            if native_reasoning and self._preserve_thinking_enabled(model):
+                thought_sig = self._store_preserved_thinking(turn_id, native_reasoning)
+
             await self.log_abe_intent(turn_id, parent_evt_id, reasoning, action, thought_signature=thought_sig)
             await self.execute_action(turn_id, action)
 
