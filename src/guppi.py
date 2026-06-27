@@ -109,6 +109,16 @@ REDIS_RETRY_BASE = float(os.environ.get("REDIS_RETRY_BASE", 0.5))
 # Lock Config
 DEFAULT_LOCK_TTL_MS = 60000
 
+# Chat stream policy
+# - chat:general: passive town-square; wakes on @mentions or explicit subscription.
+# - chat:watercooler: moderated morning/social room; wakes all agents, but stays non-urgent.
+# - chat:synchronous: emergency/moot channel; wakes all agents and bypasses governor.
+
+DEFAULT_CHAT_STREAMS = ("chat:general", "chat:watercooler", "chat:synchronous")
+WAKE_ALL_CHAT_STREAMS = {"chat:watercooler", "chat:synchronous"}
+URGENT_CHAT_STREAMS = {"chat:synchronous"}
+MODERATED_CHAT_STREAMS = {"chat:watercooler", "chat:synchronous"}
+
 # Safety
 STREAM_DENY_LIST = ["volition:action_log", "volition:heartbeat", "volition:log_stream"]
 FLASH_FORBIDDEN_TOOLS = {
@@ -414,7 +424,9 @@ class GuppiDaemon:
 
         # Subscriptions
         self.explicit_subscriptions = set()
-        self.active_streams = {"chat:synchronous": "$", "volition:kill_switch": "$", "chat:general": "$"}
+        #self.active_streams = {"chat:synchronous": "$", "volition:kill_switch": "$", "chat:general": "$"}
+        self.active_streams = {stream: "$" for stream in DEFAULT_CHAT_STREAMS}
+        self.active_streams["volition:kill_switch"] = "$"
         # Load subs from disk
         self.subs_file = ABE_ROOT / ".abe-subscriptions"
         if self.subs_file.exists():
@@ -1700,11 +1712,12 @@ class GuppiDaemon:
 
                                 content_str = str(data.get("content", "")).lower()
                                 is_mentioned = (f"@{self.abe_name}" in content_str) or ("@all" in content_str)
-                                should_wake = (stream_name in self.explicit_subscriptions) or is_mentioned or (stream_name == "chat:synchronous")
+                                should_wake = (stream_name in self.explicit_subscriptions) or is_mentioned or (stream_name in WAKE_ALL_CHAT_STREAMS)
 
                                 if should_wake:
                                     try:
-                                        context = await self._fetch_chat_context(stream_name)
+                                        context_limit = 12 if stream_name in MODERATED_CHAT_STREAMS else 5
+                                        context = await self._fetch_chat_context(stream_name, count=context_limit)
                                         parent_evt_id = await self.log_guppi_event("NewChatMessage", data, source=stream_name)
                                         trigger_data = {
                                             "event": "Chat", "channel": stream_name,
@@ -1803,7 +1816,7 @@ class GuppiDaemon:
         original_event = self._extract_original_event(event_data)
 
         # A. Emergency Channel
-        if event_data.get("channel") == "chat:synchronous": is_urgent = True
+        if event_data.get("channel") in URGENT_CHAT_STREAMS: is_urgent = True
         # B. System Escalations
         elif system_notice: is_urgent = True
         # C. Alarms
@@ -2661,13 +2674,29 @@ You were asleep for: {time_str}
             elif tool == "chat_grab_stick":
                 channel = action.get("channel", "chat:synchronous")
                 lock_key = f"lock:{channel}"
-                acquired = await self.r.set(lock_key, self.abe_name, nx=True, px=DEFAULT_LOCK_TTL_MS)
+                ttl_ms = int(action.get("ttl_ms", DEFAULT_LOCK_TTL_MS))
+                ttl_ms = max(5000, min(ttl_ms, 300000))
+
+                context_limit = int(action.get("context_limit", 12 if channel in MODERATED_CHAT_STREAMS else 5))
+                context_limit = max(1, min(context_limit, 25))
+                recent_context = await self._fetch_chat_context(channel, count=context_limit)
+
+                acquired = await self.r.set(lock_key, self.abe_name, nx=True, px=ttl_ms)
                 if acquired:
-                    # SILENT ACQUISITION: Do not xadd to the channel. Just notify the local Abe.
-                    result = {"status": "granted", "channel": channel, "note": f"You hold the stick for {DEFAULT_LOCK_TTL_MS/1000}s. Proceed with chat_post."}
+                    result = {
+                        "status": "granted",
+                        "channel": channel,
+                        "note": f"You hold the stick for {ttl_ms/1000}s. Use this time to THINK, review recent_context, then chat_post.",
+                        "recent_context": recent_context,
+                    }
                 else:
                     current_owner = await self.r.get(lock_key)
-                    result = {"status": "denied", "channel": channel, "current_speaker": current_owner or "unknown"}
+                    result = {
+                        "status": "denied",
+                        "channel": channel,
+                        "current_speaker": current_owner or "unknown",
+                        "recent_context": recent_context,
+                    }
 
             elif tool == "chat_ignore":
                 result["status"] = "ignored"
@@ -2806,8 +2835,8 @@ You were asleep for: {time_str}
             "subscribe_channel": "Listen to a Redis Stream. Args: channel",
             "unsubscribe_channel": "Stop waking for a channel (except mentions). Args: channel",
             "chat_history": "Fetch past messages. Args: channel, limit (max 20)",
-            "chat_ignore": "Explicitly ignore an interrupt (e.g., chat) without taking action. Use this to signal 'Active Listening' without replying.",
-            "chat_grab_stick": f"ATTEMPT to acquire the 'Talking Stick' (lock) for a specific channel (default: chat:synchronous). Returns {{status: granted|denied}}. Lock expires in {DEFAULT_LOCK_TTL_MS/1000}s (use this time to THINK, then POST). Posting to the channel AUTOMATICALLY releases the lock. DO NOT hold the stick if you do not intend to post. Args: channel (optional)",
+            "chat_ignore": "Explicitly ignore a chat interrupt without replying. Use this for chat:synchronous or chat:watercooler when you have no useful contribution.",
+            "chat_grab_stick": f"ATTEMPT to acquire the 'Talking Stick' lock for a moderated channel. Defaults to chat:synchronous; also valid for chat:watercooler. Returns {{status: granted|denied, recent_context: [...]}}. Lock expires in {DEFAULT_LOCK_TTL_MS/1000}s by default unless ttl_ms is provided; use this time to THINK, review recent_context, then POST. Posting to the channel AUTOMATICALLY releases the lock. DO NOT hold the stick if you do not intend to post. Args: channel optional, ttl_ms optional, context_limit optional.",
             "chat_post": "Post a message to a channel. If you hold the lock for this channel, it is automatically released. Args: message, channel (optional, default: chat:general)",
             "notify_human": "Notify the human operator for coordination, questions, or permission. Use when you need a human decision before proceeding. This is non-urgent. Args: message, priority (optional)",
             "alert_human": "Alert the human operator about urgent issues, safety concerns, or broken invariants. Use sparingly for situations requiring immediate attention. Args: message, priority (optional)",
