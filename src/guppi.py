@@ -111,7 +111,16 @@ DEFAULT_LOCK_TTL_MS = 60000
 
 # Safety
 STREAM_DENY_LIST = ["volition:action_log", "volition:heartbeat", "volition:log_stream"]
-FLASH_FORBIDDEN_TOOLS = {"shell", "write_file", "spawn_abe", "remote_exec", "spawn_scribe", "manage_script_registry"}
+FLASH_FORBIDDEN_TOOLS = {
+    "shell",
+    "write_file",
+    "spawn_abe",
+    "remote_exec",
+    "spawn_scribe",
+    "spawn_roamer",
+    "manage_clipboard",
+    "manage_script_registry",
+}
 
 # Logging Setup
 logging.basicConfig(
@@ -151,48 +160,178 @@ class ContextLengthExceededError(Exception):
     """Raised when the LLM API returns a 400 Context Length Exceeded error."""
     pass
 
-# [NEW] Volition 7.8: Clipboard Class
+# 8.1 : New clipboard
 class Clipboard:
-    """Manages the persistent scratchpad for the agent."""
+    """Manages the persistent scratchpad for the agent.
+
+    Storage model:
+    - One logical clipboard item per non-empty line.
+    - User-facing indices are 1-based.
+    - Multi-line content is normalized into multiple items.
+    """
+    VALID_STATUSES = {
+        "IN PROGRESS",
+        "DONE",
+        "BLOCKED",
+        "FAILED",
+        "CANCELLED",
+    }
+
+    STATUS_PREFIX_RE = re.compile(
+        r"^\[(?: |x|X|IN PROGRESS|DONE|BLOCKED|FAILED|CANCELLED)\]\s*"
+    )
+
     def __init__(self, filepath: Path):
         self.path = filepath
 
+    def _normalize_items(self, content: Any) -> List[str]:
+        if content is None:
+            return []
+        return [line.strip() for line in str(content).splitlines() if line.strip()]
+
     def _read_lines(self) -> List[str]:
-        if not self.path.exists(): return []
-        lines = [line.strip() for line in self.path.read_text().splitlines() if line.strip()]
-        return lines
+        if not self.path.exists():
+            return []
+        return self._normalize_items(self.path.read_text(encoding="utf-8"))
+
+    def _write_lines(self, lines: List[str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=str(self.path.parent),
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            if lines:
+                tf.write("\n".join(lines) + "\n")
+            temp_path = Path(tf.name)
+        os.replace(temp_path, self.path)
+
+    def _coerce_index(self, index: Any) -> int:
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid clipboard index: {index!r}")
+
+        if idx < 1:
+            raise ValueError("Clipboard indices are 1-based; index must be >= 1.")
+
+        return idx
 
     def read(self) -> str:
         lines = self._read_lines()
-        if not lines: return "(Empty)"
-        # Return formatted list with indices
+        if not lines:
+            return "(Empty)"
         return "\n".join([f"{i+1}. {line}" for i, line in enumerate(lines)])
 
     def add(self, content: str) -> str:
         lines = self._read_lines()
-        # Simple deduplication
-        if content in lines: return "Item already exists."
-        lines.append(content)
-        self.path.write_text("\n".join(lines))
-        return f"Added item {len(lines)}"
+        new_items = self._normalize_items(content)
+
+        if not new_items:
+            return "No content provided."
+
+        added = 0
+        skipped = 0
+
+        for item in new_items:
+            if item in lines:
+                skipped += 1
+                continue
+            lines.append(item)
+            added += 1
+
+        self._write_lines(lines)
+        return f"Added {added} item(s). Skipped {skipped} duplicate(s)."
+
+    def set(self, content: str) -> str:
+        new_items = self._normalize_items(content)
+        self._write_lines(new_items)
+        return f"Clipboard set to {len(new_items)} item(s)."
+
+    def insert(self, index: int, content: str) -> str:
+        lines = self._read_lines()
+        new_items = self._normalize_items(content)
+
+        if not new_items:
+            return "No content provided."
+
+        idx = self._coerce_index(index)
+        zero_idx = min(idx - 1, len(lines))
+        lines[zero_idx:zero_idx] = new_items
+
+        self._write_lines(lines)
+        return f"Inserted {len(new_items)} item(s) at index {idx}."
+
+    def replace(self, index: int, content: str) -> str:
+        lines = self._read_lines()
+        new_items = self._normalize_items(content)
+
+        if not new_items:
+            return "No replacement content provided."
+
+        idx = self._coerce_index(index)
+        zero_idx = idx - 1
+
+        if zero_idx >= len(lines):
+            return f"Index {idx} out of range. Clipboard has {len(lines)} item(s)."
+
+        lines[zero_idx:zero_idx + 1] = new_items
+        self._write_lines(lines)
+        return f"Replaced item {idx} with {len(new_items)} item(s)."
+
+    def mark(self, index: int, status: str = "DONE") -> str:
+        lines = self._read_lines()
+        idx = self._coerce_index(index)
+        zero_idx = idx - 1
+
+        if zero_idx >= len(lines):
+            return f"Index {idx} out of range. Clipboard has {len(lines)} item(s)."
+
+        clean_status = str(status or "DONE").strip().upper()
+        if clean_status not in self.VALID_STATUSES:
+            allowed = ", ".join(sorted(self.VALID_STATUSES))
+            return f"Invalid status {clean_status!r}. Allowed: {allowed}."
+
+        old_line = lines[zero_idx]
+        stripped_line = self.STATUS_PREFIX_RE.sub("", old_line).strip()
+        lines[zero_idx] = f"[{clean_status}] {stripped_line}"
+
+        self._write_lines(lines)
+        return f"Marked item {idx} as [{clean_status}]."
 
     def remove(self, indices: List[int]) -> str:
         lines = self._read_lines()
-        # Sort indices descending to avoid shifting problems
-        indices = sorted(indices, reverse=True)
+
+        clean_indices = []
+        for raw_idx in indices:
+            try:
+                clean_indices.append(self._coerce_index(raw_idx))
+            except ValueError:
+                continue
+
+        clean_indices = sorted(set(clean_indices), reverse=True)
         removed_count = 0
-        for idx in indices:
-            # Adjust for 1-based index
+
+        for idx in clean_indices:
             zero_idx = idx - 1
             if 0 <= zero_idx < len(lines):
                 lines.pop(zero_idx)
                 removed_count += 1
 
-        self.path.write_text("\n".join(lines))
+        self._write_lines(lines)
         return f"Removed {removed_count} item(s)."
 
-    def clear(self) -> str:
-        self.path.write_text("")
+    def clear(self, confirm: bool = False) -> str:
+        lines = self._read_lines()
+
+        if lines and not confirm:
+            return (
+                "Refusing to clear non-empty clipboard without confirm=true. "
+                "Use mark/replace/remove for normal plan maintenance."
+            )
+
+        self._write_lines([])
         return "Clipboard cleared."
 
 class Governor:
@@ -2146,22 +2285,83 @@ You were asleep for: {time_str}
             if tool == "help":
                 result = self._tool_help(action.get("tool_name"))
 
+            # 8.1: New(er) Clipboard
             # [NEW] 7.8: Clipboard Tool
             elif tool == "manage_clipboard":
-                sub = action.get("action", "read")
+                sub = str(action.get("action", "read")).strip().lower()
+
                 if sub == "read":
                     result = {"status": "success", "content": self.clipboard.read()}
+
                 elif sub == "add":
-                    result = {"status": "success", "message": self.clipboard.add(action.get("content", ""))}
-                elif sub == "remove":
-                    idx = action.get("index") or action.get("indices")
-                    if idx:
-                        if isinstance(idx, (str, int)): idx = [int(idx)]
-                        result = {"status": "success", "message": self.clipboard.remove(idx)}
-                    else:
+                    result = {
+                        "status": "success",
+                        "message": self.clipboard.add(action.get("content", "")),
+                    }
+
+                elif sub in ("set", "overwrite"):
+                    result = {
+                        "status": "success",
+                        "message": self.clipboard.set(action.get("content", "")),
+                    }
+
+                elif sub == "insert":
+                    idx = action.get("index")
+                    if idx is None:
                         result = {"status": "error", "message": "Missing index"}
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.insert(idx, action.get("content", "")),
+                        }
+
+                elif sub in ("replace", "update", "edit"):
+                    idx = action.get("index")
+                    if idx is None:
+                        result = {"status": "error", "message": "Missing index"}
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.replace(idx, action.get("content", "")),
+                        }
+
+                elif sub in ("mark", "mark_done", "mark_status"):
+                    idx = action.get("index")
+                    if idx is None:
+                        result = {"status": "error", "message": "Missing index"}
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.mark(idx, action.get("status", "DONE")),
+                        }
+
+                elif sub == "remove":
+                    idx = action.get("indices", action.get("index"))
+                    if idx is None:
+                        result = {"status": "error", "message": "Missing index or indices"}
+                    else:
+                        if isinstance(idx, (str, int)):
+                            idx = [idx]
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.remove(idx),
+                        }
+
                 elif sub == "clear":
-                    result = {"status": "success", "message": self.clipboard.clear()}
+                    result = {
+                        "status": "success",
+                        "message": self.clipboard.clear(confirm=bool(action.get("confirm", False))),
+                    }
+
+                else:
+                    result = {
+                        "status": "error",
+                        "message": f"Unknown manage_clipboard action: {sub}",
+                        "allowed_actions": [
+                            "read", "add", "set", "insert", "replace",
+                            "mark", "mark_done", "remove", "clear"
+                        ],
+                    }
 
             elif tool == "shell":
                 cmd = action.get("command")
@@ -2538,7 +2738,17 @@ You were asleep for: {time_str}
             "alert_human": "Alert the human operator about urgent issues, safety concerns, or broken invariants. Use sparingly for situations requiring immediate attention. Args: message, priority (optional)",
             "web_search": "Search the internet via SearXNG. Args: query",
             "web_read": "Read a webpage as Markdown. More useful when used in conjunction with search. You get full results if <5000 chars, if not, you'll get a saved file path which you can use with Scribe in analyze mode to tell it what you were looking for. Args: url",
-            "manage_clipboard": "Manage your persistent scratchpad. actions: 'read', 'add' (requires content), 'remove' (requires index or list of indices), 'clear'. Items here survive log flushing. Use this for temporary constraints, reminders, or scratch notes.",
+            "manage_clipboard": (
+                "Manage your persistent scratchpad. Use this for temporary reminders, scratchpad etc."
+                "Actions: read; add(content) appends one or more newline-separated items; "
+                "set/overwrite(content) replaces the whole clipboard; "
+                "insert(index, content) inserts before index; "
+                "replace(index, content) replaces one item; "
+                "mark/mark_done(index, status optional) marks an item [DONE], [IN PROGRESS], [BLOCKED], [FAILED], or [CANCELLED]; "
+                "remove(index or indices) deletes specific items; "
+                "clear(confirm=true) clears all items. "
+                "Use mark_done for routine checklist progress. Do not use clear for normal plan updates."
+            ),
             "manage_script_registry": "Add, update, or remove custom executable scripts in the fleet registry. Actions: add|update|remove. Args: action, host, path, description (required for add/update)."
         }
         if tool_name: return tools.get(tool_name, "Unknown tool")
