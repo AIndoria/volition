@@ -32,7 +32,7 @@ except ImportError:
 
 # --- CONFIGURATION ---
 # Default to local vLLM/Ollama/LlamaCpp
-DEFAULT_API_URL = os.environ.get("ROAMER_API_URL", "") 
+DEFAULT_API_URL = os.environ.get("ROAMER_API_URL", "")
 DEFAULT_API_KEY = os.environ.get("ROAMER_API_KEY", "volition-local")
 DEFAULT_MODEL = os.environ.get("MODEL_ROAMER", "qwen-2.5-14b-coder")
 
@@ -45,16 +45,16 @@ logger = logging.getLogger("roamer")
 
 class SafeShell:
     """Enforces read-only discipline on the Investigator."""
-    
+
     ALLOWED_CMDS = [
-        "ls", "cat", "grep", "head", "tail", "find", 
-        "stat", "df", "du", "whoami", "date", "echo", 
+        "ls", "cat", "grep", "head", "tail", "find",
+        "stat", "df", "du", "whoami", "date", "echo",
         "awk", "sed", "cut", "sort", "uniq", "wc", "uptime", "free",
         "journalctl"
     ]
 
     FORBIDDEN_FLAGS = ["-i", "su"]
-    
+
     # Hostnames must not start with '-' to avoid option injection in ssh-like commands.
     HOSTNAME_PATTERN = re.compile(r"^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$")
 
@@ -68,7 +68,7 @@ class SafeShell:
     def validate(self, cmd: str) -> (bool, str):
         if not isinstance(cmd, str) or not cmd.strip():
             return False, "Empty command."
-            
+
         # We ALLOW the pipe '|', but block chaining, subshells, and redirection
         forbidden_chars = ['&', ';', '$', '`', '<', '>', '\n']
         if any(c in cmd for c in forbidden_chars):
@@ -79,21 +79,21 @@ class SafeShell:
         for segment in segments:
             segment = segment.strip()
             if not segment: return False, "Empty pipe segment."
-            
+
             try:
                 tokens = shlex.split(segment)
             except ValueError as e:
                 return False, f"Command parsing error: {e}"
-                
+
             if not tokens: return False, "Empty command in pipeline."
-                
+
             base = tokens[0]
             # If they use sudo, shift the base command check to the next token
             if base == "sudo":
                 if len(tokens) < 2:
                     return False, "Empty sudo command."
                 base = tokens[1]
-                
+
             if base not in self.ALLOWED_CMDS:
                 return False, f"Command '{base}' in pipeline is not in the read-only whitelist."
 
@@ -123,12 +123,12 @@ class SafeShell:
                 # Local as a string (shell=True) because validate() proved every segment is safe
                 logger.info(f"EXEC LOCAL: {cmd}")
                 result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=15)
-            
+
             stdout, stderr = result.stdout, result.stderr
 
             if len(stdout) > 4000:
                 stdout = stdout[:4000] + "\n... [TRUNCATED: Output exceeded 4000 chars] ..."
-            
+
             output = ""
             if stdout: output += f"STDOUT:\n{stdout}"
             if stderr: output += f"\nSTDERR:\n{stderr}"
@@ -138,10 +138,10 @@ class SafeShell:
             return "ERROR: Command timed out (15s limit)."
         except Exception as e:
             return f"ERROR: Execution failed: {e}"
-    
+
 # --- THE INVESTIGATOR AGENT ---
 class RoamerAgent:
-    def __init__(self, directive, target_host, output_inbox, debug_mode=False, api_url=None, model=None):
+    def __init__(self, directive, target_host, output_inbox, debug_mode=False, api_url=None, model=None, parent_turn_id=""):
         self.directive = directive
         self.shell = SafeShell(target_host)
         self.output_inbox = output_inbox
@@ -150,13 +150,14 @@ class RoamerAgent:
         raw_model = model or DEFAULT_MODEL
         self.is_local = raw_model.startswith("local/")
         self.model = raw_model.replace("local/", "") if raw_model.startswith("local/") else raw_model
-        
-        
+        self.parent_turn_id = parent_turn_id
+
+
         url = api_url or DEFAULT_API_URL
         req_timeout = 1200.0 if self.is_local else 120.0
 
         self.client = OpenAI(base_url=url, api_key=DEFAULT_API_KEY, timeout=req_timeout)
-        
+
         self.history = [
             {"role": "system", "content": self._build_system_prompt(target_host)}
         ]
@@ -170,7 +171,7 @@ TARGET HOST: {host}
 YOUR DIRECTIVE: {self.directive}
 
 TOOLS AVAILABLE:
-1. execute_shell: Run a shell command. 
+1. execute_shell: Run a shell command.
    - CONSTRAINTS: READ-ONLY. Allowed: ls, cat, grep, find, head, tail, df, du, journalctl.
    - FORBIDDEN: rm, mv, cp, nano, vim, sed -i, > redirection, sudo(allowed with limits).
    - If the user asks for a fix, INVESTIGATE first, then propose the fix in your final report. DO NOT execute it.
@@ -188,10 +189,10 @@ PROTOCOL:
 
     def run(self):
         logger.info(f"Starting Investigation on {self.shell.target_host} (Debug: {self.debug_mode})")
-        
+
         for turn in range(MAX_TURNS):
             logger.info(f"Turn {turn+1}/{MAX_TURNS}")
-            
+
             # 1. Get LLM Response
             try:
                 response = self.client.chat.completions.create(
@@ -362,9 +363,13 @@ PROTOCOL:
             "event": event_type,
             "timestamp": datetime.utcnow().isoformat(),
             "content": content,
-            "meta": {"source": "roamer", "target": self.shell.target_host}
+            "meta": {
+                "source": "roamer",
+                "target": self.shell.target_host,
+                "parent_turn_id": self.parent_turn_id,
+            }
         }
-        
+
         if self.debug_mode:
             print("\n" + "="*40)
             print(f"FINAL PAYLOAD ({event_type}):")
@@ -377,6 +382,7 @@ PROTOCOL:
                 logger.info(f"Result pushed to {self.output_inbox}")
             except Exception as e:
                 logger.error(f"Redis Push Failed: {e}")
+                sys.exit(2)
 
 # --- MAIN ---
 if __name__ == "__main__":
@@ -384,7 +390,8 @@ if __name__ == "__main__":
     parser.add_argument("--directive", required=True, help="What to investigate")
     parser.add_argument("--target-host", default="local", help="Hostname (must be in .ssh/config) or 'local'")
     parser.add_argument("--output-inbox", default="inbox:debug", help="Redis inbox to push results to")
-    
+    parser.add_argument("--parent-turn-id", default="", help="Parent GUPPI turn id for correlation")
+
     # Configuration Overrides
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help="OpenAI-compatible API URL")
     parser.add_argument("--model", default=DEFAULT_MODEL, help="Model name")
@@ -393,11 +400,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     agent = RoamerAgent(
-        args.directive, 
-        args.target_host, 
-        args.output_inbox, 
+        args.directive,
+        args.target_host,
+        args.output_inbox,
         debug_mode=args.debug,
         api_url=args.api_url,
-        model=args.model
+        model=args.model,
+        parent_turn_id=args.parent_turn_id,
     )
     agent.run()

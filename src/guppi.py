@@ -2413,12 +2413,28 @@ You were asleep for: {time_str}
                         "--directive", directive,
                         "--target-host", target_host,
                         "--output-inbox", f"inbox:{self.abe_name}",
+                        "--parent-turn-id", turn_id,
                         "--api-url", target_url,
                         "--model", roamer_model
                     ]
                     # Spawn untracked so GUPPI isn't blocked waiting for the investigation
-                    await self._spawn_subprocess_exec(turn_id, cmd, tracked=False)
-                    result = {"status": "spawned_untracked", "note": f"Roamer dispatched to investigate '{target_host}'. Results will arrive in your inbox."}
+                    # Spawn logged-untracked so GUPPI is not blocked, but failures are not silent.
+                    log_path = await self._spawn_logged_untracked_exec(
+                        turn_id,
+                        cmd,
+                        label="roamer",
+                        notify_on_failure=True,
+                    )
+                    result = {
+                        "status": "spawned_logged_untracked",
+                        "note": (
+                            f"Roamer dispatched to investigate '{target_host}'. "
+                            f"Results should arrive in your inbox. "
+                            f"Debug log: {log_path}. "
+                            "Set a todo reminder for 20-30 minutes to check the Roamer result/log if no report arrives."
+                        ),
+                        "log_path": str(log_path),
+                    }
 
 
             elif tool == "spawn_scribe":
@@ -3013,6 +3029,120 @@ You were asleep for: {time_str}
             }
         except Exception as e:
             return {"error": str(e)}
+
+    def _tail_file_text(self, path: Path, max_bytes: int = 4000) -> str:
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+                data = f.read()
+            return data.decode("utf-8", errors="replace")
+        except Exception as e:
+            return f"(Failed to read log tail: {e})"
+
+    async def _monitor_logged_untracked_process(
+        self,
+        turn_id: str,
+        proc,
+        log_path: Path,
+        log_fh,
+        label: str,
+        notify_on_failure: bool = True,
+    ):
+        try:
+            rc = await proc.wait()
+            try:
+                footer = f"\n\n--- {label} exited with code {rc} at {datetime.utcnow().isoformat()} ---\n"
+                log_fh.write(footer.encode("utf-8", errors="replace"))
+                log_fh.flush()
+            except Exception:
+                pass
+
+            if rc != 0 and notify_on_failure:
+                tail = await asyncio.to_thread(self._tail_file_text, log_path, 4000)
+                msg = {
+                    "type": "GUPPIEvent",
+                    "event": f"{label.title()}Failed",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "content": (
+                        f"{label} subprocess exited with code {rc}. "
+                        f"Log: {log_path}\n\n--- LOG TAIL ---\n{tail}"
+                    ),
+                    "meta": {
+                        "source": "guppi",
+                        "subprocess_label": label,
+                        "action_id": turn_id,
+                        "log_path": str(log_path),
+                        "returncode": rc,
+                    },
+                }
+                await retry_async(self.r.lpush, f"inbox:{self.abe_name}", json.dumps(msg))
+                self._local_wakeup.set()
+
+        except Exception as e:
+            logger.error(f"Logged subprocess monitor failed for {turn_id}: {e}", exc_info=True)
+        finally:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
+
+    async def _spawn_logged_untracked_exec(
+        self,
+        turn_id: str,
+        cmd,
+        label: str = "job",
+        notify_on_failure: bool = True,
+    ) -> Path:
+        log_dir = LOGS_DIR / label
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_turn = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(turn_id))
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        log_path = log_dir / f"{ts}-{safe_turn}.log"
+
+        log_fh = open(log_path, "ab", buffering=0)
+        header = (
+            f"--- {label} started at {datetime.utcnow().isoformat()} ---\n"
+            f"turn_id: {turn_id}\n"
+            f"cmd: {cmd!r}\n\n"
+        )
+        log_fh.write(header.encode("utf-8", errors="replace"))
+
+        try:
+            if isinstance(cmd, str):
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=log_fh,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=log_fh,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+
+            asyncio.create_task(
+                self._monitor_logged_untracked_process(
+                    turn_id=turn_id,
+                    proc=proc,
+                    log_path=log_path,
+                    log_fh=log_fh,
+                    label=label,
+                    notify_on_failure=notify_on_failure,
+                )
+            )
+            logger.info(f"Spawned logged untracked {label} for {turn_id}; log={log_path}")
+            return log_path
+
+        except Exception:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
+            raise
 
     async def _spawn_subprocess_exec(self, turn_id, cmd, tracked=True):
         if tracked: await self.subproc_semaphore.acquire()
