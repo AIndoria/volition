@@ -8,10 +8,12 @@ venv/
 
 # Runtime artifacts
 .env
+.env.*
 *.log
 *.db
 *.sqlite
 *.sqlite3
+pr_diff*.txt
 
 # OS / Editor
 .DS_Store
