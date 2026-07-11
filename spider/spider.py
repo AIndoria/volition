@@ -24,7 +24,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
@@ -68,22 +68,15 @@ FILTER_MODEL = os.environ.get("SPIDER_FILTER_MODEL", CONTROLLER_MODEL).replace("
 FILTER_API_KEY = os.environ.get("SPIDER_FILTER_API_KEY", CONTROLLER_API_KEY)
 USE_FILTER_MODEL = os.environ.get("SPIDER_USE_FILTER_MODEL", "0") == "1"
 DEBUG_DIR = Path.home() / "logs" / "debug"
-SESSION_DIR = Path(os.environ.get("SPIDER_OUTPUT_DIR", str(Path.home() / "spider_sessions")))
+
+
+def expand_path(value: str | Path) -> Path:
+    return Path(value).expanduser()
+
+
+SESSION_DIR = expand_path(os.environ.get("SPIDER_OUTPUT_DIR", str(Path.home() / "spider_sessions")))
 CACHE_DIR = SESSION_DIR / ".cache"
 DOC_DIR = SESSION_DIR / ".docs"
-try:
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    DOC_DIR.mkdir(parents=True, exist_ok=True)
-except OSError as exc:
-    fallback_session_dir = Path.home() / "spider_sessions"
-    print(f"[WARN] Could not use SPIDER_OUTPUT_DIR={SESSION_DIR}: {exc}; falling back to {fallback_session_dir}", file=sys.stderr)
-    SESSION_DIR = fallback_session_dir
-    CACHE_DIR = SESSION_DIR / ".cache"
-    DOC_DIR = SESSION_DIR / ".docs"
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    DOC_DIR.mkdir(parents=True, exist_ok=True)
 SEARCH_BACKEND_UNAVAILABLE = False
 BRAVE_SEARCH_URL = "https://api.search.brave.com/res/v1/web/search"
 DEFAULT_LOCK_PATH = Path(os.environ.get("SPIDER_LOCK_PATH", "/tmp/spider-gpu.lock"))
@@ -145,14 +138,33 @@ def normalize_search_query(query: str, max_chars: int = 220) -> str:
     return compact[:max_chars].strip() or query[:max_chars].strip()
 
 
+def ensure_session_dirs() -> None:
+    global SESSION_DIR, CACHE_DIR, DOC_DIR
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        DOC_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        fallback_session_dir = Path.home() / "spider_sessions"
+        print(
+            f"[WARN] Could not use SPIDER_OUTPUT_DIR={SESSION_DIR}: {exc}; "
+            f"falling back to {fallback_session_dir}",
+            file=sys.stderr,
+        )
+        SESSION_DIR = fallback_session_dir
+        CACHE_DIR = SESSION_DIR / ".cache"
+        DOC_DIR = SESSION_DIR / ".docs"
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        DOC_DIR.mkdir(parents=True, exist_ok=True)
+
+
 def set_session_dir(path: Path) -> None:
     global SESSION_DIR, CACHE_DIR, DOC_DIR
-    SESSION_DIR = path.expanduser()
+    SESSION_DIR = expand_path(path)
     CACHE_DIR = SESSION_DIR / ".cache"
     DOC_DIR = SESSION_DIR / ".docs"
-    SESSION_DIR.mkdir(parents=True, exist_ok=True)
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    DOC_DIR.mkdir(parents=True, exist_ok=True)
+    ensure_session_dirs()
 
 
 def artifact_path(name: str) -> Path:
@@ -160,12 +172,14 @@ def artifact_path(name: str) -> Path:
 
 
 def write_json_artifact(name: str, data: Any) -> Path:
+    ensure_session_dirs()
     path = artifact_path(name)
     path.write_text(json.dumps(sanitize_for_storage(data), indent=2, ensure_ascii=False), encoding="utf-8")
     return path
 
 
 def write_text_artifact(name: str, text: str) -> Path:
+    ensure_session_dirs()
     path = artifact_path(name)
     path.write_text(strip_thinking(text), encoding="utf-8")
     return path
@@ -553,6 +567,39 @@ def url_variant_keys(url: str) -> set[str]:
     for variant in normalize_source_variants(url):
         keys.add(canonical_url_key(variant))
     return {key for key in keys if key}
+
+
+def source_identity_keys(url: str) -> set[str]:
+    """Return narrowly defined source-identity keys without fetch fallbacks."""
+    parsed = urlparse((url or "").strip())
+    if not parsed.scheme or not parsed.netloc:
+        return {(url or "").strip()} if (url or "").strip() else set()
+
+    host = parsed.hostname.lower() if parsed.hostname else parsed.netloc.lower()
+    path = parsed.path.rstrip("/") or "/"
+    keys = {f"{parsed.scheme.lower()}://{host}{path}" + (f"?{parsed.query}" if parsed.query else "")}
+
+    if host in {"arxiv.org", "www.arxiv.org"}:
+        match = re.match(r"/(?:abs|pdf)/([^/?#]+)", path)
+        if match:
+            keys.add(f"arxiv:{match.group(1).removesuffix('.pdf')}")
+    elif host == "export.arxiv.org" and path == "/api/query":
+        paper_ids = parse_qs(parsed.query).get("id_list", [])
+        if len(paper_ids) == 1 and "," not in paper_ids[0]:
+            keys.add(f"arxiv:{paper_ids[0]}")
+
+    if host == "github.com":
+        parts = path.strip("/").split("/")
+        if len(parts) >= 5 and parts[2] == "blob":
+            owner, repo, _, branch = parts[:4]
+            keys.add(f"github-blob:{owner.lower()}/{repo.lower()}/{branch}/{'/'.join(parts[4:])}")
+    elif host == "raw.githubusercontent.com":
+        parts = path.strip("/").split("/")
+        if len(parts) >= 4:
+            owner, repo, branch = parts[:3]
+            keys.add(f"github-blob:{owner.lower()}/{repo.lower()}/{branch}/{'/'.join(parts[3:])}")
+
+    return keys
 
 
 def extract_text_from_response(resp: requests.Response, max_chars: int = 16000) -> str:
@@ -1403,7 +1450,7 @@ def min_extracted_source_score(session: "SpiderSession") -> int:
 
 
 def find_existing_source_by_url(session: "SpiderSession", url: str) -> Optional[dict[str, Any]]:
-    wanted = url_variant_keys(url)
+    wanted = source_identity_keys(url)
     for source in session.sources:
         source_urls = {
             source.get("requested_url", ""),
@@ -1412,7 +1459,7 @@ def find_existing_source_by_url(session: "SpiderSession", url: str) -> Optional[
         }
         seen: set[str] = set()
         for item in source_urls:
-            seen |= url_variant_keys(item)
+            seen |= source_identity_keys(item)
         if wanted & seen:
             return source
     return None
@@ -1436,6 +1483,7 @@ class SpiderSession:
         min_sources: Optional[int] = None,
         min_reads: Optional[int] = None,
     ):
+        ensure_session_dirs()
         if session_id:
             self.session_id = session_id
             self.load()
@@ -1518,6 +1566,7 @@ class SpiderSession:
         )
 
     def save(self) -> None:
+        ensure_session_dirs()
         self.session_path.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
 
     def load(self) -> None:
@@ -1564,9 +1613,9 @@ class SpiderSession:
         url = source.get("requested_url") or source.get("url") or source.get("final_url")
         if not url:
             return None
-        for existing in self.sources:
-            if url in {existing.get("requested_url"), existing.get("url"), existing.get("final_url")}:
-                return existing["source_id"]
+        existing = find_existing_source_by_url(self, url)
+        if existing:
+            return existing["source_id"]
         if len(self.sources) >= self.max_sources:
             return None
         source_id = f"S{len(self.sources) + 1}"
@@ -2428,7 +2477,9 @@ def add_frontier_candidate(session: SpiderSession, item: dict[str, Any]) -> bool
     if not url or not is_readable_url(url) or is_blocklisted_url(url):
         session.record_frontier_state(item, "skipped_low_policy_score", "unreadable or blocklisted")
         return False
-    if source_already_seen(session, url) or any(existing.get("url") == url for existing in session.frontier):
+    candidate_keys = source_identity_keys(url)
+    queued_keys = set().union(*(source_identity_keys(existing.get("url", "")) for existing in session.frontier))
+    if source_already_seen(session, url) or candidate_keys & queued_keys:
         session.record_frontier_state(item, "skipped_duplicate", "already seen or already queued")
         return False
     item.setdefault("tool", "read_url")

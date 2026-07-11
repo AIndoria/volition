@@ -76,6 +76,27 @@ class SpiderUtilityTests(unittest.TestCase):
             spider.canonical_url_key("https://docs.python.org/3/howto/free-threading-extensions.html"),
         )
 
+    def test_source_identity_keys_only_merge_proven_equivalences(self):
+        github_blob = spider.source_identity_keys("https://github.com/owner/repo/blob/main/README.md")
+        github_raw = spider.source_identity_keys("https://raw.githubusercontent.com/owner/repo/main/README.md")
+        self.assertTrue(github_blob & github_raw)
+
+        arxiv_abs = spider.source_identity_keys("https://arxiv.org/abs/2602.13367")
+        arxiv_pdf = spider.source_identity_keys("https://arxiv.org/pdf/2602.13367")
+        self.assertTrue(arxiv_abs & arxiv_pdf)
+
+        python_313 = spider.source_identity_keys("https://docs.python.org/3.13/howto/free-threading-extensions.html")
+        python_314 = spider.source_identity_keys("https://docs.python.org/3.14/howto/free-threading-extensions.html")
+        self.assertFalse(python_313 & python_314)
+
+        repo_root = spider.source_identity_keys("https://github.com/owner/repo")
+        releases = spider.source_identity_keys("https://github.com/owner/repo/releases")
+        self.assertFalse(repo_root & releases)
+
+    def test_configured_paths_expand_home_without_creating_directories(self):
+        self.assertEqual(spider.expand_path("~/spider_sessions"), Path.home() / "spider_sessions")
+        self.assertEqual(morning_brief.expand_path("~/morning_briefs"), Path.home() / "morning_briefs")
+
     def test_source_scoring(self):
         raw_readme = "# Model Card\n\nThis model card describes reasoning, alignment, benchmark evaluation, license, citation, and code generation capabilities."
         frontend_js = "window.__APP__ = {}; document.documentElement; webpack chunk localStorage cookie.match javascript frontend"
@@ -158,6 +179,41 @@ class SpiderUtilityTests(unittest.TestCase):
         self.assertEqual(observation["status"], "already_read")
         self.assertEqual(observation["source_id"], sid)
         self.assertEqual(session.read_count, 1)
+
+    def test_source_and_frontier_deduplicate_equivalent_urls(self):
+        session = spider.SpiderSession(question="duplicate variants", max_sources=5, max_reads=3)
+        blob_url = "https://github.com/owner/repo/blob/main/README.md"
+        raw_url = "https://raw.githubusercontent.com/owner/repo/main/README.md"
+        source_id = session.add_source(
+            {
+                "requested_url": blob_url,
+                "url": blob_url,
+                "final_url": blob_url,
+                "adapter": "web",
+                "text": "README evidence",
+                "score": 30,
+            }
+        )
+        self.assertEqual(
+            session.add_source(
+                {
+                    "requested_url": raw_url,
+                    "url": raw_url,
+                    "final_url": raw_url,
+                    "adapter": "web",
+                    "text": "README evidence",
+                    "score": 30,
+                }
+            ),
+            source_id,
+        )
+        self.assertEqual(len(session.sources), 1)
+
+        first = {"tool": "read_url", "url": "https://example.test/article", "title": "Article", "snippet": "evidence", "search_score": 80}
+        equivalent = {"tool": "read_url", "url": "https://example.test/article/", "title": "Article", "snippet": "evidence", "search_score": 80}
+        self.assertTrue(spider.add_frontier_candidate(session, first))
+        self.assertFalse(spider.add_frontier_candidate(session, equivalent))
+        self.assertEqual(len(session.frontier), 1)
 
     def test_search_frontier_skips_unreadable_model_artifacts(self):
         session = spider.SpiderSession(question="artifact filter", max_sources=5, max_reads=3)

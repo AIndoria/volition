@@ -44,8 +44,14 @@ BRIEF_API_KEY = os.environ.get("BRIEF_API_KEY", "")
 if not BRIEF_API_KEY and not any(local in BRIEF_API_URL for local in ("localhost", "127.0.0.1", "10.")):
     BRIEF_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("OPENROUTER_API_KEY", "")
 DEBUG_DIR = Path.home() / "logs" / "debug"
-SEARCH_CACHE_DIR = Path(os.environ.get("MORNING_BRIEF_SEARCH_CACHE_DIR", str(Path.home() / ".cache" / "morning_brief")))
-DEFAULT_OUTPUT_DIR = Path(os.environ.get("MORNING_BRIEF_OUTPUT_DIR", str(Path.home() / "morning_briefs")))
+
+
+def expand_path(value: str | Path) -> Path:
+    return Path(value).expanduser()
+
+
+SEARCH_CACHE_DIR = expand_path(os.environ.get("MORNING_BRIEF_SEARCH_CACHE_DIR", str(Path.home() / ".cache" / "morning_brief")))
+DEFAULT_OUTPUT_DIR = expand_path(os.environ.get("MORNING_BRIEF_OUTPUT_DIR", str(Path.home() / "morning_briefs")))
 MORNING_BRIEF_API_CALLS = 0
 
 
