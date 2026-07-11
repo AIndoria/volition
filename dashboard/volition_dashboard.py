@@ -15,7 +15,7 @@ from typing import List
 
 import redis.asyncio as redis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
@@ -28,6 +28,7 @@ REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
 DASHBOARD_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = DASHBOARD_DIR / "templates"
 DEFAULT_CHAT_STREAMS = ["chat:general", "chat:watercooler", "chat:synchronous"]
+DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
 DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8000"))
 
 # --- APP SETUP ---
@@ -63,14 +64,9 @@ async def get_debug():
     return {
         "app": "volition-dashboard",
         "port": DASHBOARD_PORT,
-        "template_dir": str(TEMPLATE_DIR),
         "desktop_template": "index.html",
         "mobile_template": "mobile.html",
     }
-
-@app.get("/metrics", response_class=PlainTextResponse)
-async def get_metrics():
-    return "volition_dashboard_info 1\n"
 
 # --- REDIS MANAGER ---
 class RedisManager:
@@ -363,7 +359,7 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     uvicorn.run(
         "volition_dashboard:app",
-        host="0.0.0.0",
+        host=DASHBOARD_HOST,
         port=DASHBOARD_PORT,
         reload=False,
         access_log=False,
