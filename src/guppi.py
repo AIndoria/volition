@@ -368,6 +368,9 @@ class Clipboard:
         self._write_lines([])
         return "Clipboard cleared."
 
+    def has_items(self) -> bool:
+        return bool(self._read_lines())
+
 class Governor:
     def __init__(self, abe_name, redis_client):
         self.abe_name = abe_name
@@ -2076,23 +2079,19 @@ class GuppiDaemon:
         try:
             event_type = event_data.get("event")
 
-            # Check if this is a direct email rather than a system inbox event.
-            # Payload may be a raw string for malformed/plain inbox items, so normalize first.
-            payload = event_data.get("payload") or {}
-            if not isinstance(payload, dict):
-                payload = {}
-
-            payload_event_type = payload.get("event_type", "")
-            is_human_email = (event_type == "Inbox" and payload_event_type == "NewInboxMessage")
-            is_chat = (event_type == "Chat")
+            # Social rooms use Flash; inbox, emergency chat, and system work use Pro.
+            channel = str(event_data.get("channel", "")).strip().lower()
+            is_social_chat = event_type == "Chat" and channel in {
+                "chat:general",
+                "chat:watercooler",
+            }
 
             if force_model is not None:
                 model = force_model
                 is_flash = (model == MODEL_FLASH)
                 target_url = os.environ.get("FLASH_API_URL") if is_flash else os.environ.get("PRO_API_URL")
             else:
-                # Route both Stream Chat and Direct Emails to Flash
-                if is_chat:
+                if is_social_chat:
                     model = MODEL_FLASH
                     is_flash = True
                     target_url = os.environ.get("FLASH_API_URL")
@@ -2712,10 +2711,17 @@ You were asleep for: {time_str}
                         }
 
                 elif sub == "clear":
-                    result = {
-                        "status": "success",
-                        "message": self.clipboard.clear(confirm=bool(action.get("confirm", False))),
-                    }
+                    confirmed = action.get("confirm") is True
+                    if self.clipboard.has_items() and not confirmed:
+                        result = {
+                            "status": "refused",
+                            "message": self.clipboard.clear(confirm=False),
+                        }
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.clear(confirm=confirmed),
+                        }
 
                 else:
                     result = {
