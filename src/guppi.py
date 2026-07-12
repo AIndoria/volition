@@ -27,18 +27,18 @@ import aiosqlite
 import sqlite3
 import redis.asyncio as redis
 import asyncssh
-import aiohttp 
+import aiohttp
 import chromadb
-from chromadb.config import Settings 
+from chromadb.config import Settings
 try:
-    from google import genai 
+    from google import genai
 except ImportError:
-    pass 
+    pass
 # v6.1: Web Reading
 try:
     import trafilatura
 except ImportError:
-    trafilatura = None 
+    trafilatura = None
 
 # -------------------------------------------------------
 
@@ -69,16 +69,17 @@ LOGS_DIR = ABE_ROOT / "logs"
 INBOX_DUMP_LOG = LOGS_DIR / "inbox_dump.jsonl"
 
 # Network Config
-REDIS_HOST = os.environ.get("REDIS_HOST")
+REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
-REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "volition") 
+REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "volition")
 REDIS_URL = os.environ.get("REDIS_URL", f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0")
-NTFY_URL = os.environ.get("NTFY_URL")
-NTFY_TOKEN = os.environ.get("NTFY_TOKEN")
+NTFY_URL = os.environ.get("NTFY_URL", "")
+NTFY_TOKEN = os.environ.get("NTFY_TOKEN", "")
+
 
 
 # v6.1: Search Config
-SEARXNG_URL = os.environ.get("SEARXNG_URL", "https://civitat.es/search") 
+SEARXNG_URL = os.environ.get("SEARXNG_URL", "https://civitat.es/search")
 
 # API Config
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
@@ -87,16 +88,29 @@ OPENROUTER_APP_NAME = os.environ.get("OPENROUTER_APP_NAME", "Volition")
 
 # v6.5: Split-Brain Config
 # Defaulting to standard model names so they map cleanly via OpenRouter or Local
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview") 
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview")
 MODEL_PRO = os.environ.get("MODEL_PRO", "google/gemini-3-flash-preview:thinking")
 MODEL_FLASH = os.environ.get("MODEL_FLASH", "google/gemini-3-flash-preview")
-MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "local/mistral") 
+MODEL_SUMMARIZE = os.environ.get("MODEL_SUMMARIZE", "local/mistral")
+
+# Qwen3.6 preserve-thinking support.
+# - auto: enabled only for Qwen 3.6-family model names.
+# - off: never enabled
+# - on/force/always: enabled regardless of model name for local experiments
+PRESERVE_THINKING_MODE = os.environ.get("GUPPI_PRESERVE_THINKING", "auto").strip().lower()
+
+try:
+    PRESERVE_THINKING_TURNS = int(os.environ.get("GUPPI_PRESERVE_THINKING_TURNS", "4"))
+except (TypeError, ValueError):
+    PRESERVE_THINKING_TURNS = 4
+PRESERVE_THINKING_TURNS = max(0, min(PRESERVE_THINKING_TURNS, 8))
+
 
 # v7.0: Social Stream Config
 SOCIAL_DIGEST_STREAM = "volition:social_digests"
 
 GOVERNOR_LIMIT = 15
-GOVERNOR_WINDOW = 300 
+GOVERNOR_WINDOW = 300
 
 # Behavior / Tuning
 MAX_CONCURRENT_SUBPROCS = int(os.environ.get("MAX_CONCURRENT_SUBPROCS", 4))
@@ -106,11 +120,30 @@ REDIS_RETRY_ATTEMPTS = int(os.environ.get("REDIS_RETRY_ATTEMPTS", 3))
 REDIS_RETRY_BASE = float(os.environ.get("REDIS_RETRY_BASE", 0.5))
 
 # Lock Config
-DEFAULT_LOCK_TTL_MS = 60000 
+DEFAULT_LOCK_TTL_MS = 60000
+
+# Chat stream policy
+# - chat:general: passive town-square; wakes on @mentions or explicit subscription.
+# - chat:watercooler: moderated morning/social room; wakes all agents, but stays non-urgent.
+# - chat:synchronous: emergency/moot channel; wakes all agents and bypasses governor.
+
+DEFAULT_CHAT_STREAMS = ("chat:general", "chat:watercooler", "chat:synchronous")
+WAKE_ALL_CHAT_STREAMS = {"chat:watercooler", "chat:synchronous"}
+URGENT_CHAT_STREAMS = {"chat:synchronous"}
+MODERATED_CHAT_STREAMS = {"chat:watercooler", "chat:synchronous"}
 
 # Safety
 STREAM_DENY_LIST = ["volition:action_log", "volition:heartbeat", "volition:log_stream"]
-FLASH_FORBIDDEN_TOOLS = {"shell", "write_file", "spawn_abe", "remote_exec", "spawn_scribe", "manage_script_registry"}
+FLASH_FORBIDDEN_TOOLS = {
+    "shell",
+    "write_file",
+    "spawn_abe",
+    "remote_exec",
+    "spawn_scribe",
+    "spawn_roamer",
+    "manage_clipboard",
+    "manage_script_registry",
+}
 
 # Logging Setup
 logging.basicConfig(
@@ -122,7 +155,6 @@ logger = logging.getLogger("guppi")
 
 if not NTFY_URL:
     logger.warning("NTFY not configured; human notifications disabled.")
-    
 
 # --- UTILITY HELPERS ---
 
@@ -142,6 +174,7 @@ async def retry_async(func, *args, attempts=REDIS_RETRY_ATTEMPTS, **kwargs):
     raise last_ex
 
 
+
 class LLMOutputError(Exception):
     """Raised when the LLM returns garbage that json.loads hates."""
     pass
@@ -150,74 +183,218 @@ class ContextLengthExceededError(Exception):
     """Raised when the LLM API returns a 400 Context Length Exceeded error."""
     pass
 
-# [NEW] Volition 7.8: Clipboard Class
+# 8.1 : New clipboard
 class Clipboard:
-    """Manages the persistent scratchpad for the agent."""
+    """Manages the persistent scratchpad for the agent.
+
+    Storage model:
+    - One logical clipboard item per non-empty line.
+    - User-facing indices are 1-based.
+    - Multi-line content is normalized into multiple items.
+    """
+    VALID_STATUSES = {
+        "IN PROGRESS",
+        "DONE",
+        "BLOCKED",
+        "FAILED",
+        "CANCELLED",
+    }
+
+    STATUS_PREFIX_RE = re.compile(
+        r"^\[(?: |x|X|IN PROGRESS|DONE|BLOCKED|FAILED|CANCELLED)\]\s*"
+    )
+
     def __init__(self, filepath: Path):
         self.path = filepath
-        
+
+    def _normalize_items(self, content: Any) -> List[str]:
+        if content is None:
+            return []
+        return [line.strip() for line in str(content).splitlines() if line.strip()]
+
     def _read_lines(self) -> List[str]:
-        if not self.path.exists(): return []
-        lines = [line.strip() for line in self.path.read_text().splitlines() if line.strip()]
-        return lines
+        if not self.path.exists():
+            return []
+        return self._normalize_items(self.path.read_text(encoding="utf-8"))
+
+    def _write_lines(self, lines: List[str]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=str(self.path.parent),
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            if lines:
+                tf.write("\n".join(lines) + "\n")
+            temp_path = Path(tf.name)
+        os.replace(temp_path, self.path)
+
+    def _coerce_index(self, index: Any) -> int:
+        try:
+            idx = int(index)
+        except (TypeError, ValueError):
+            raise ValueError(f"Invalid clipboard index: {index!r}")
+
+        if idx < 1:
+            raise ValueError("Clipboard indices are 1-based; index must be >= 1.")
+
+        return idx
 
     def read(self) -> str:
         lines = self._read_lines()
-        if not lines: return "(Empty)"
-        # Return formatted list with indices
+        if not lines:
+            return "(Empty)"
         return "\n".join([f"{i+1}. {line}" for i, line in enumerate(lines)])
 
     def add(self, content: str) -> str:
         lines = self._read_lines()
-        # Simple deduplication
-        if content in lines: return "Item already exists."
-        lines.append(content)
-        self.path.write_text("\n".join(lines))
-        return f"Added item {len(lines)}"
+        new_items = self._normalize_items(content)
+
+        if not new_items:
+            return "No content provided."
+
+        added = 0
+        skipped = 0
+
+        for item in new_items:
+            if item in lines:
+                skipped += 1
+                continue
+            lines.append(item)
+            added += 1
+
+        self._write_lines(lines)
+        return f"Added {added} item(s). Skipped {skipped} duplicate(s)."
+
+    def set(self, content: str) -> str:
+        new_items = self._normalize_items(content)
+        self._write_lines(new_items)
+        return f"Clipboard set to {len(new_items)} item(s)."
+
+    def insert(self, index: int, content: str) -> str:
+        lines = self._read_lines()
+        new_items = self._normalize_items(content)
+
+        if not new_items:
+            return "No content provided."
+
+        try:
+            idx = self._coerce_index(index)
+        except ValueError as e:
+            return str(e)
+        zero_idx = min(idx - 1, len(lines))
+        lines[zero_idx:zero_idx] = new_items
+
+        self._write_lines(lines)
+        return f"Inserted {len(new_items)} item(s) at index {idx}."
+
+    def replace(self, index: int, content: str) -> str:
+        lines = self._read_lines()
+        new_items = self._normalize_items(content)
+
+        if not new_items:
+            return "No replacement content provided."
+
+        try:
+            idx = self._coerce_index(index)
+        except ValueError as e:
+            return str(e)
+
+        zero_idx = idx - 1
+
+        if zero_idx >= len(lines):
+            return f"Index {idx} out of range. Clipboard has {len(lines)} item(s)."
+
+        lines[zero_idx:zero_idx + 1] = new_items
+        self._write_lines(lines)
+        return f"Replaced item {idx} with {len(new_items)} item(s)."
+
+    def mark(self, index: int, status: str = "DONE") -> str:
+        lines = self._read_lines()
+        try:
+            idx = self._coerce_index(index)
+        except ValueError as e:
+            return str(e)
+
+        zero_idx = idx - 1
+
+        if zero_idx >= len(lines):
+            return f"Index {idx} out of range. Clipboard has {len(lines)} item(s)."
+
+        clean_status = str(status or "DONE").strip().upper()
+        if clean_status not in self.VALID_STATUSES:
+            allowed = ", ".join(sorted(self.VALID_STATUSES))
+            return f"Invalid status {clean_status!r}. Allowed: {allowed}."
+
+        old_line = lines[zero_idx]
+        stripped_line = self.STATUS_PREFIX_RE.sub("", old_line).strip()
+        lines[zero_idx] = f"[{clean_status}] {stripped_line}"
+
+        self._write_lines(lines)
+        return f"Marked item {idx} as [{clean_status}]."
 
     def remove(self, indices: List[int]) -> str:
         lines = self._read_lines()
-        # Sort indices descending to avoid shifting problems
-        indices = sorted(indices, reverse=True)
+
+        clean_indices = []
+        for raw_idx in indices:
+            try:
+                clean_indices.append(self._coerce_index(raw_idx))
+            except ValueError:
+                continue
+
+        clean_indices = sorted(set(clean_indices), reverse=True)
         removed_count = 0
-        for idx in indices:
-            # Adjust for 1-based index
+
+        for idx in clean_indices:
             zero_idx = idx - 1
             if 0 <= zero_idx < len(lines):
                 lines.pop(zero_idx)
                 removed_count += 1
-        
-        self.path.write_text("\n".join(lines))
+
+        self._write_lines(lines)
         return f"Removed {removed_count} item(s)."
 
-    def clear(self) -> str:
-        self.path.write_text("")
+    def clear(self, confirm: bool = False) -> str:
+        lines = self._read_lines()
+
+        if lines and not confirm:
+            return (
+                "Refusing to clear non-empty clipboard without confirm=true. "
+                "Use mark/replace/remove for normal plan maintenance."
+            )
+
+        self._write_lines([])
         return "Clipboard cleared."
+
+    def has_items(self) -> bool:
+        return bool(self._read_lines())
 
 class Governor:
     def __init__(self, abe_name, redis_client):
         self.abe_name = abe_name
         self.r = redis_client
-        self.call_history = [] 
+        self.call_history = []
         self.cooldown_until = 0.0
         self._is_pruning = False
 
     async def check_limit(self) -> bool:
         now = time.time()
         self.call_history = [t for t in self.call_history if now - t < GOVERNOR_WINDOW]
-        if len(self.call_history) >= GOVERNOR_LIMIT: 
-            return False 
+        if len(self.call_history) >= GOVERNOR_LIMIT:
+            return False
         self.call_history.append(now)
         return True
 
     async def set_status(self, state: str, reason: str = None):
         payload = {
-            "state": state, 
-            "reason": reason, 
-            "timestamp": int(time.time()), 
+            "state": state,
+            "reason": reason,
+            "timestamp": int(time.time()),
             "host": os.uname().nodename
         }
-        try: 
+        try:
             # We use set with expiry to avoid stale status
             await retry_async(self.r.set, f"status:{self.abe_name}", json.dumps(payload), ex=3600*24)
         except: pass
@@ -234,10 +411,10 @@ class GuppiDaemon:
         # 2. Connections
         self.r = redis.from_url(REDIS_URL, decode_responses=True)
         self.governor = Governor(self.abe_name, self.r)
-        
+
         # [NEW] 7.8: Initialize Clipboard
         self.clipboard = Clipboard(ABE_ROOT / f".abe-clipboard-{self.abe_name}.md")
-        
+
         # v7.2: Dedicated Internal Queue for System Callbacks (Vectors/RPC)
         self.internal_queue = f"internal:{self.abe_name}"
 
@@ -245,7 +422,7 @@ class GuppiDaemon:
         self.running_subprocesses: Dict[str, asyncio.subprocess.Process] = {}
         self.log_buffer: List[Dict] = []
         self.log_lock = asyncio.Lock()
-        
+
         # 4. Concurrency Control
         self.subproc_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SUBPROCS)
         # 5. Lifecycle
@@ -253,17 +430,20 @@ class GuppiDaemon:
         self._bg_tasks: List[asyncio.Task] = []
         self._is_pruning = False
         self.pending_vector_tasks = {}
+        self.preserved_thinking_cache: Dict[str, str] = {}
         self._prune_started_at = 0.0
         self._current_prune_id = None
         self.SCRIBE_SUCCESS_EVENTS = {"TaskCompleted", "ScribeResult"} # this is what happens when code evolves more than the plandocs
-        
+
         self.processed_triggers = {}
         self.processed_triggers_ttl = 90
 
-        
+
         # Subscriptions
         self.explicit_subscriptions = set()
-        self.active_streams = {"chat:synchronous": "$", "volition:kill_switch": "$", "chat:general": "$"}
+        #self.active_streams = {"chat:synchronous": "$", "volition:kill_switch": "$", "chat:general": "$"}
+        self.active_streams = {stream: "$" for stream in DEFAULT_CHAT_STREAMS}
+        self.active_streams["volition:kill_switch"] = "$"
         # Load subs from disk
         self.subs_file = ABE_ROOT / ".abe-subscriptions"
         if self.subs_file.exists():
@@ -274,14 +454,14 @@ class GuppiDaemon:
             except: pass
 
         self.chroma_client = None
-        self._local_wakeup = asyncio.Event() 
+        self._local_wakeup = asyncio.Event()
         self.cooldown_until = 0.0
 
         self._init_fs()
         self._init_db_sync()
         self._load_log_buffer()
-        self._perform_crash_recovery() 
-        
+        self._perform_crash_recovery()
+
         # Orientation State
         self.last_sleep_ts = time.time()
         if self.log_buffer:
@@ -293,10 +473,10 @@ class GuppiDaemon:
                     self.last_sleep_ts = datetime.fromisoformat(ts_str).timestamp()
                     logger.info(f"Restored sleep state: {ts_str} (Duration: {time.time() - self.last_sleep_ts:.1f}s)")
             except: pass
-        
+
         self.last_social_sync_ts = self.last_sleep_ts
         logger.info(f"GUPPI v8.0.0-rc2 Initialized for {self.abe_name}")
-    
+
         # --- The Machete Helper ---
     def _looks_control_heavy_text(self, text: str, sample_size: int = 4096) -> tuple[bool, dict]:
         """Detect text that will explode when JSON-escaped, e.g. binary journals full of NULs."""
@@ -305,7 +485,6 @@ class GuppiDaemon:
             return False, {"sample_len": 0, "nul_count": 0, "control_count": 0, "control_ratio": 0.0}
 
         nul_count = sample.count("\x00")
-        control_count = sum(
         control_count = sum(
             1 for ch in sample
             if ch != "\x00" and ord(ch) < 32 and ch not in ("\n", "\r", "\t")
@@ -411,7 +590,7 @@ class GuppiDaemon:
             )
 
         return text
-    
+
     def _atomic_write_json(self, path: Path, data: dict):
         """Safely writes JSON to avoid corruption during simultaneous Abe updates."""
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -429,7 +608,7 @@ class GuppiDaemon:
             except asyncio.TimeoutError:
                 proc.kill()
                 stdout, stderr = await proc.communicate()
-            
+
             # 8.1: Decode outputs safely with pre-patch cap to prevent memory issues and log flooding
             stdout_str = self._decode_tool_output(stdout, "stdout")
             stderr_str = self._decode_tool_output(stderr, "stderr")
@@ -459,7 +638,7 @@ class GuppiDaemon:
             self.display_name = f"{self.abe_name} ({self.persona})"
         else:
             self.display_name = self.abe_name
-            
+
         logger.info(f"Identity Refreshed: {self.display_name}")
 
     def _init_fs(self):
@@ -505,7 +684,7 @@ class GuppiDaemon:
                 entry["results"] = {"error": "GUPPI Crash/Restart Detected"}
                 entry["timestamp_outcome"] = datetime.utcnow().isoformat()
                 recovered = True
-        
+
         if recovered:
             self._rewrite_log_file_sync()
 
@@ -524,16 +703,16 @@ class GuppiDaemon:
         try:
             today = datetime.now().strftime("%Y-%m-%d")
             log_path = ABE_ROOT / "logs" / f"changelog_{today}.md"
-            
+
             if not log_path.exists():
                 return "(No changelog entries for today yet.)"
-                
+
             # Read explicitly with utf-8 to avoid encoding grief
             with open(log_path, 'r', encoding='utf-8') as f:
                 # deque is efficient for tailing files
                 from collections import deque
                 tail = deque(f, maxlen=lines)
-                
+
             return "".join(tail).strip()
         except Exception as e:
             return f"(Error reading changelog: {e})"
@@ -562,18 +741,18 @@ class GuppiDaemon:
 
             with open(INBOX_DUMP_LOG, "a") as f:
                 f.write(json.dumps(entry) + "\n")
-                f.flush() 
+                f.flush()
                 os.fsync(f.fileno())
         except Exception as e:
             logger.critical(f"FATAL: Failed to persist inbox message! {e}")
-    
+
     # --- MEMORY OVERFLOW SYSTEM (v7.2.2) ---
     def _cleanup_overflow(self):
         """Prevents the overflow directory from growing infinitely."""
         overflow_dir = MEMORY_DIR / "overflow"
         if not overflow_dir.exists(): return
 
-        # Retention Policy: 3 Days. 
+        # Retention Policy: 3 Days.
         # If Abe hasn't looked at a log in 3 days, he's not going to.
         retention_seconds = 3 * 86400
         now = time.time()
@@ -601,8 +780,22 @@ class GuppiDaemon:
 
             is_most_recent = (i == len(buffer_copy) - 1)
             char_limit = 50000 if is_most_recent else 1000
-            
+
             new_entry = entry.copy()
+
+            # Preserve-thinking traces can be very large and should not be
+            # injected into the normal visible [WORKING_MEMORY_LOG]. Qwen3.6
+            # gets them through messages[].reasoning_content instead.
+            if "thought_signature" in new_entry:
+                sig = new_entry.get("thought_signature")
+                if isinstance(sig, str) and sig:
+                    new_entry["thought_signature"] = (
+                        f"[PRESERVED_THINKING_STORED: {len(sig)} chars; "
+                        "omitted from visible working-memory context]"
+                    )
+                else:
+                    new_entry.pop("thought_signature", None)
+
             res = new_entry.get("results")
             turn_id = new_entry.get("id", "unknown")
 
@@ -611,7 +804,7 @@ class GuppiDaemon:
                 if isinstance(entry["content"], str):
                     new_entry["content"] = self._truncate_output(entry["content"], limit=char_limit)
 
-            
+
             # Helper to process text fields
             def _process_text(text, suffix=""):
                 text = self._truncate_output(text, limit=char_limit, label=suffix.strip("-") or "history")
@@ -619,12 +812,12 @@ class GuppiDaemon:
                 # Deterministic Filename (Turn ID + Suffix)
                 safe_name = f"{turn_id}{suffix}.txt"
                 dump_path = overflow_dir / safe_name
-                
+
                 # Idempotent Write (Don't rewrite if exists, saves IO)
                 if not dump_path.exists():
                     try: dump_path.write_text(text, encoding="utf-8")
                     except: return text[:char_limit] + "... [WRITE FAILED]"
-                
+
                 # --- FIX: USE DYNAMIC LIMIT ---
                 # Calculate split size based on the specific limit for this entry (1000 or 50000)
                 split_size = int(char_limit / 2)
@@ -646,10 +839,10 @@ class GuppiDaemon:
                 if "stderr" in res_copy and isinstance(res_copy["stderr"], str):
                     res_copy["stderr"] = _process_text(res_copy["stderr"], "-stderr")
                 new_entry["results"] = res_copy
-                
+
             sanitized.append(new_entry)
         return json.dumps(sanitized, indent=2)
-    
+
     def _parse_stream_id(self, stream_id: str):
         try:
             if "-" in stream_id:
@@ -665,11 +858,11 @@ class GuppiDaemon:
         try:
             start_id = int(start_ts * 1000)
             end_id = int(end_ts * 1000)
-            
+
             if end_id - start_id < 1000: return []
 
             raw_entries = await self.r.xrange(SOCIAL_DIGEST_STREAM, min=start_id, max=end_id)
-            
+
             if raw_entries:
                 logger.info(f"Syncing {len(raw_entries)} missed social digests...")
                 with open(COMM_LOG, "a") as f:
@@ -678,7 +871,7 @@ class GuppiDaemon:
                         count = data.get("msg_count", 0)
                         participants = data.get("participants", "[]")
                         gen_at = data.get("generated_at", datetime.utcnow().isoformat())
-                        
+
                         # Archive to Mbox
                         log_entry = (
                             f"\n[{gen_at}] [SOCIAL DIGEST] ({count} msgs)\n"
@@ -687,7 +880,7 @@ class GuppiDaemon:
                             f"{'-'*40}\n"
                         )
                         f.write(log_entry)
-                        
+
                         # Add to return list for Orientation
                         digests.append({
                             "time": gen_at,
@@ -708,7 +901,7 @@ class GuppiDaemon:
             },
             "derived": { "kind": "Unknown", "inferred": False }
         }
-        
+
         data = raw_data
         if isinstance(raw_data, bytes):
             try: data = raw_data.decode('utf-8')
@@ -718,23 +911,26 @@ class GuppiDaemon:
                 parsed = json.loads(data)
                 if isinstance(parsed, dict): data = parsed
             except: pass
-            
+
         if isinstance(data, dict):
-            norm["observed"]["raw"] = data 
+            norm["observed"]["raw"] = data
             norm["observed"]["event_type"] = data.get("event_type", data.get("event"))
             norm["observed"]["from"] = data.get("from")
-            norm["observed"]["meta"] = data.get("meta", {})
+            meta = data.get("meta", {})
+            if not isinstance(meta, dict):
+                meta = {}
+            norm["observed"]["meta"] = meta
             norm["observed"]["content"] = data.get("content") or data.get("results")
-            
+
             # --- [FIX] ROBUST ACTION_ID EXTRACTION ---
             # We check Top Level -> Content/Results -> Meta to find the UUID.
             # This prevents "Id Blindness" where identical results are deduped as duplicates.
             action_id = None
-            
+
             # 1. Top Level (Standard GUPPI Event)
-            if data.get("action_id"): 
+            if data.get("action_id"):
                 action_id = data.get("action_id")
-            
+
             # 2. Inside Content/Results (e.g. some internal RPCs)
             if not action_id:
                 cont = norm["observed"]["content"]
@@ -746,7 +942,7 @@ class GuppiDaemon:
                         or cont.get("id")
                     )
 
-            
+
             # 3. Inside Meta (Scribe/Maintenance jobs)
             if not action_id:
                 action_id = norm["observed"]["meta"].get("action_id")
@@ -755,11 +951,11 @@ class GuppiDaemon:
             if action_id and isinstance(action_id, str):
                 norm["observed"]["action_id"] = action_id.strip()
             # -----------------------------------------
-            
+
             et = norm["observed"]["event_type"]
             # ... (Rest of classification logic remains the same) ...
             if et in ["NewInboxMessage", "NewChatMessage"]:
-                norm["derived"]["kind"] = "HumanMessage" 
+                norm["derived"]["kind"] = "HumanMessage"
             elif et in ["TaskCompleted", "ScribeResult"]:
                 norm["derived"]["kind"] = "ScribeResult"
             elif et in ["SystemAlert", "AlarmClock"]:
@@ -767,11 +963,11 @@ class GuppiDaemon:
             else:
                 norm["derived"]["kind"] = "StructuredMessage"
         else:
-            norm["observed"]["raw"] = str(data) 
+            norm["observed"]["raw"] = str(data)
             norm["observed"]["content"] = str(data)
-            norm["derived"]["kind"] = "RawMessage" 
+            norm["derived"]["kind"] = "RawMessage"
             norm["derived"]["inferred"] = True
-            
+
         return norm
 
     def _archive_inbox_message(self, norm: Dict):
@@ -780,7 +976,7 @@ class GuppiDaemon:
             timestamp = datetime.utcnow().isoformat()
             sender = norm["observed"].get("from") or "unknown"
             kind = norm["derived"]["kind"]
-            
+
             # FILTER: Only archive actual communication, not system noise
             should_archive = False
             if kind in ["HumanMessage", "StructuredMessage", "RawMessage", "Unknown"]:
@@ -792,7 +988,7 @@ class GuppiDaemon:
                 body = norm["observed"]["raw"]
                 if isinstance(body, (dict, list)): body = json.dumps(body, indent=2)
                 else: body = str(body)
-                
+
                 entry = (
                     f"\n[{timestamp}] FROM: {sender} (Type: {norm['observed']['event_type']})\n"
                     f"{body}\n{'-'*40}\n"
@@ -812,7 +1008,7 @@ class GuppiDaemon:
     # --- LOG PRUNING WITH SCRIBE (RESTORED 7.2.3.1) ---
     async def _prune_logs(self):
         logger.info("[PRUNE] we ENTER _prune_logs")
-        if self._is_pruning: 
+        if self._is_pruning:
             logger.debug("Prune already in flight, skipping overlapping trigger.")
             return
         self._is_pruning = True
@@ -861,11 +1057,11 @@ class GuppiDaemon:
                 f"## Pending / Unresolved\n"
                 f"(If none, write 'None')"
             )
-            
+
             with tempfile.NamedTemporaryFile('w', delete=False) as pf:
                 pf.write(prompt)
                 prompt_path = pf.name
-            
+
             meta_json = json.dumps({
                 "maintenance": True,
                 "source_tier_1": f"log-{ts}.jsonl",
@@ -876,13 +1072,13 @@ class GuppiDaemon:
                 "prune_id": self._current_prune_id,
                 "prompt_path": prompt_path
             })
-            
+
             current_model = MODEL_SUMMARIZE
             target_url = os.environ.get("SUMMARIZE_API_URL", "http://127.0.0.1:8080/v1")
             cmd = [
-                sys.executable, str(BIN_DIR / "scribe.py"), 
-                "--model", current_model, 
-                "--prompt-file", prompt_path, 
+                sys.executable, str(BIN_DIR / "scribe.py"),
+                "--model", current_model,
+                "--prompt-file", prompt_path,
                 "--output-inbox", f"inbox:{self.abe_name}",
                 "--mode", "summarize",
                 "--api-url", target_url,
@@ -890,7 +1086,7 @@ class GuppiDaemon:
             ]
 
             spawn_success = await self._spawn_subprocess_exec(f"auto-prune-{ts}", cmd, tracked=False)
-            
+
             if not spawn_success:
                 logger.error("Failed to spawn prune job. Releasing lock immediately.")
                 self._is_pruning = False
@@ -899,20 +1095,21 @@ class GuppiDaemon:
             logger.error(f"Failed to spawn prune job: {e}")
             self._is_pruning = False # Only reset here if the SPAWN failed
         #  8.0.0_rc2 : We hold the lock until the inbox returns. Removed finally block.
-        
+
 
     # --- EVENT & INTENT LOGGING ---
 
     async def log_guppi_event(self, event_type, content, source="GUPPI") -> str:
-
         # [FIX] Truncate the content immediately upon entry to prevent echo bloat.
         if isinstance(content, str):
             truncated_content = self._truncate_output(content)
         elif isinstance(content, dict):
             # Shallow copy to avoid mutating original payload if it's used elsewhere
             truncated_content = content.copy()
+            # Optionally recurse if you want, but top-level truncation is usually enough
         else:
             truncated_content = content
+
         evt_id = f"evt-{uuid.uuid4().hex[:8]}"
         entry = {
             "id": evt_id, "type": "GUPPIEvent", "agent": self.abe_name,
@@ -929,12 +1126,12 @@ class GuppiDaemon:
     async def log_abe_intent(self, turn_id, parent_evt_id, reasoning, action, thought_signature=None):
         entry = {
             "id": turn_id, "type": "AbeTurn", "agent": self.abe_name,
-            "parent_event_id": parent_evt_id, 
+            "parent_event_id": parent_evt_id,
             "timestamp_intent": datetime.utcnow().isoformat(),
             "status": "pending", "reasoning": reasoning, "action": action, "results": None
         }
         if thought_signature: entry["thought_signature"] = thought_signature
-        
+
         async with self.log_lock:
             self.log_buffer.append(entry)
             try: await self._rewrite_log_file()
@@ -946,9 +1143,9 @@ class GuppiDaemon:
 
     async def patch_abe_outcome(self, turn_id, results, notify=True):
         # --- SAFETY: TRUNCATE MASSIVE OUTPUTS (The Wallet Saver) ---
-        MAX_OUT_LEN = 20000 
+        MAX_OUT_LEN = 20000
         truncated_results = results.copy() if isinstance(results, dict) else results
-        
+
         if isinstance(truncated_results, dict):
             for k in ["stdout", "stderr"]:
                 if isinstance(truncated_results.get(k), (str, bytes)):
@@ -985,35 +1182,35 @@ class GuppiDaemon:
 
         if notify:
             try:
-                # [FIXED LOGIC] We intentionally send truncated_results to Redis too. 
+                # [FIXED LOGIC] We intentionally send truncated_results to Redis too.
                 # Sending 900k chars to Redis chokes the network and invalidates the next turn.
                 msg = {"type": "GUPPIEvent", "event": "TaskCompleted", "action_id": turn_id, "results": truncated_results}
-                
+
                 # Pushing to own inbox triggers the next Refractory Cycle
                 await retry_async(self.r.lpush, f"inbox:{self.abe_name}", json.dumps(msg))
                 self._local_wakeup.set() # Wake up main loop
             except Exception as e:
                 logger.critical(f"FATAL: Failed to notify inbox of task completion! {turn_id} Error: {e}")
-                    
+
         else:
             logger.warning(f"Orphaned task completion: {turn_id}")
 
-    
+
 
     async def _ingest_tier2(self, norm: Dict) -> bool:
         """v6.5: Ingests Tier 2 episodes and offloads vectorization to GPU Queue."""
         try:
             meta = norm["observed"].get("meta", {})
             content = str(norm["observed"].get("content", ""))
-            
+
             # Extract the event type safely from the payload envelope
             event_type = norm["observed"].get("event_type", norm["observed"].get("event", ""))
-            
+
             # Only ingest if Scribe actually succeeded (any recognized success event)
             if meta.get("mode") == "summarize" and meta.get("is_auto_prune") and content and event_type in self.SCRIBE_SUCCESS_EVENTS:
                 source_file = meta.get("source_tier_1", "unknown_source.jsonl")
                 summary_text = content
-                
+
                 # v7.2 Fix: UUIDs prevent timestamp race conditions
                 file_uuid = uuid.uuid4().hex
                 iso_ts = datetime.utcnow().isoformat()
@@ -1028,35 +1225,35 @@ class GuppiDaemon:
 
                 ep_path.write_text(summary_text)
                 logger.info(f"Ingested Tier 2 Episode: {filename}")
-                
+
                 # v7.2 Fix: Use Internal Queue for routing
                 task_payload = {
-                    "task_id": f"vec-{file_uuid}", 
-                    "type": "embed", 
-                    "content": summary_text, 
+                    "task_id": f"vec-{file_uuid}",
+                    "type": "embed",
+                    "content": summary_text,
                     "reply_to": self.internal_queue
                 }
                 await retry_async(self.r.lpush, "queue:gpu_heavy", json.dumps(task_payload))
                 logger.info(f"Offloaded vectorization for {filename} to {self.internal_queue}")
                 return True
-            
+
             elif meta.get("mode") == "summarize" and meta.get("is_auto_prune"):
                 logger.warning(f"Tier 2 ingest skipped! event_type={event_type}") # Just so the Abe knows.
                 return False
-                
+
         except Exception as e:
             logger.error(f"Failed to ingest Tier 2: {e}")
             return False
-        
+
         return False
 
     async def heartbeat_loop(self):
         while not self._stopping:
             try:
                 payload = {
-                    "abe": self.abe_name,            
-                    "display": self.display_name,    
-                    "ts": datetime.utcnow().isoformat(), 
+                    "abe": self.abe_name,
+                    "display": self.display_name,
+                    "ts": datetime.utcnow().isoformat(),
                     "host": os.uname().nodename
                 }
                 logger.info(f"❤️ Heartbeat: Buffer={len(self.log_buffer)} Pruning={self._is_pruning}")
@@ -1077,7 +1274,7 @@ class GuppiDaemon:
             await asyncio.sleep(60)
 
 
-    
+
 
     # --- NEW TASK HANDLERS (Refractory) ---
 
@@ -1086,7 +1283,7 @@ class GuppiDaemon:
         now = datetime.utcnow()
         if not due_in_str:
             return now + timedelta(hours=24) # Default fallback
-            
+
         # 1. Try relative time formats first
         try:
             if due_in_str.endswith("d"):
@@ -1103,7 +1300,7 @@ class GuppiDaemon:
             # Handle 'Z' suffix natively
             clean_str = due_in_str.replace("Z", "+00:00")
             parsed_dt = datetime.fromisoformat(clean_str)
-            
+
             # Normalize to naive UTC to match SQLite format expectations
             if parsed_dt.tzinfo is not None:
                 parsed_dt = parsed_dt.astimezone(timezone.utc).replace(tzinfo=None)
@@ -1120,19 +1317,19 @@ class GuppiDaemon:
                 # OPTIONAL: Enable WAL mode for better concurrency
                 await db.execute("PRAGMA journal_mode=WAL;")
                 await db.execute("PRAGMA busy_timeout = 5000;")
-                
+
                 # FIX 2: Filter out garbage rows
                 query = "SELECT due_timestamp FROM tasks WHERE status NOT IN ('completed', 'cancelled') AND due_timestamp IS NOT NULL AND due_timestamp != '' ORDER BY due_timestamp ASC LIMIT 1"
                 async with db.execute(query) as cursor:
                     row = await cursor.fetchone()
                     if not row: return 3600 * 24 # Default long sleep
-                    
+
                     ts_str = row[0]
-                    
+
                     # FIX 3: Handle Space vs T format mismatch
                     if " " in ts_str and "T" not in ts_str:
                         ts_str = ts_str.replace(" ", "T")
-                    
+
                     try:
                         due = datetime.fromisoformat(ts_str)
                     except ValueError:
@@ -1143,24 +1340,24 @@ class GuppiDaemon:
                     # FIX 4: Normalize to Naive UTC (The "Timezone Crash" Fix)
                     if due.tzinfo is not None:
                         due = due.astimezone(timezone.utc).replace(tzinfo=None)
-                    
+
                     now = datetime.utcnow()
                     delta = (due - now).total_seconds()
-                    
+
                     # Prevent Insomnia Loop on overdue tasks
                     if delta < 0:
                         return 300.0
-                    
+
                     return max(0.1, delta)
 
         except aiosqlite.OperationalError as e:
             # Likely a lock. Log it and sleep briefly (30s).
             logger.warning(f"Sleep calc DB lock or operational error: {e}")
             return 30.0
-            
+
         except Exception as e:
             # Real crash. Log it!
-            logger.error(f"get_alarm_sleep_time failed: {e}") 
+            logger.error(f"get_alarm_sleep_time failed: {e}")
             return 300.0
 
     # Subprocess lifecycle is owned exclusively by _monitor_subprocess.
@@ -1174,7 +1371,7 @@ class GuppiDaemon:
                     active[tid] = proc
             self.running_subprocesses = active
 
-        
+
 
     # --- FINAL HYBRID HANDLER ---
     # Combines 7.7 Maintenance Logic with 7.2.3 Context Safety
@@ -1182,13 +1379,13 @@ class GuppiDaemon:
         """Processes a raw item popped from Redis inbox."""
         if not res: return
         queue_name, raw_data = res
-        
+
         # 1. Persist (Safety)
         # (Assumes you applied the _persist_raw_inbox fix we just discussed)
         self._persist_raw_inbox(raw_data)
-        
-        # 2. Normalize 
-        norm = self._normalize_inbox_payload(raw_data) 
+
+        # 2. Normalize
+        norm = self._normalize_inbox_payload(raw_data)
 
         # --- [NEW] ROBUST DEDUPLICATION ---
         now = time.time()
@@ -1217,7 +1414,7 @@ class GuppiDaemon:
             # 3. Standard Deduplication (Keep your existing robust logic here)
                 # Stable fingerprint
                 content = observed.get("content") or observed.get("raw") or ""
-                
+
                 if isinstance(content, (dict, list)):
                     # Sort keys so {"a":1, "b":2} == {"b":2, "a":1}
                     content_snip = json.dumps(content, sort_keys=True)[:300]
@@ -1238,14 +1435,14 @@ class GuppiDaemon:
 
         self.processed_triggers[trigger_id] = now
         # ----------------------------------
-        self._archive_inbox_message(norm)             
-        
+        self._archive_inbox_message(norm)
+
         # 3. Optional Tier 2 Ingest (Text only)
         ingest_success = await self._ingest_tier2(norm)
 
         # 4. MAINTENANCE GATES (The 7.7 Fix)
         meta = norm["observed"].get("meta", {})
-        
+
         # A. Identity Stub Update
         if meta.get("job_type") == "update_stub":
             content = str(norm["observed"].get("content", ""))
@@ -1256,7 +1453,7 @@ class GuppiDaemon:
                 except Exception as e:
                     logger.error(f"Failed to write stub: {e}")
             return # <--- EXIT without Thinking
-        
+
         # B. Silent Scribe / Background Tasks
         if meta.get("maintenance") is True:
             if meta.get("is_auto_prune"):
@@ -1264,22 +1461,22 @@ class GuppiDaemon:
                 if incoming_id != getattr(self, "_current_prune_id", None):
                     logger.warning(f"Discarding stale ghost prune job ({incoming_id}). A newer job owns the lock.")
                     return # Exit without touching the lock or buffer!
-                
+
             evt_type = norm["observed"].get("event_type", norm["observed"].get("event", ""))
-            
+
             if evt_type == "ScribeFailed":
                 logger.error(f"Maintenance Scribe Failed! Output: {str(norm['observed'].get('content'))[:200]}")
                 if meta.get("is_auto_prune"):
                     self._is_pruning = False # Release lock so heartbeat tries again
                     self._current_prune_id = None
-                return 
-                
+                return
+
             # Job finished successfully, handle auto-prune specifics
             if evt_type in self.SCRIBE_SUCCESS_EVENTS and meta.get("is_auto_prune"):
                 if ingest_success:
                     # Look exactly for drop_count. No math. No fallbacks.
                     drop_count = meta.get("drop_count")
-                    
+
                     if isinstance(drop_count, int) and drop_count > 0:
                         logger.info(f"Tier 2 Episode generated. Dropping {drop_count} oldest entries.")
                         async with self.log_lock:
@@ -1290,7 +1487,7 @@ class GuppiDaemon:
                         logger.error(f"CRITICAL: Missing or invalid drop_count ({drop_count}). Skipping memory prune.")
                 else:
                     logger.warning("Tier 2 ingestion failed. Skipping memory prune to avoid data loss.")
-                
+
                 # Unconditional unlock for this job, whether ingestion worked or not
                 self._is_pruning = False
                 self._current_prune_id = None
@@ -1305,18 +1502,32 @@ class GuppiDaemon:
                 except Exception as e:
                     logger.warning(f"Failed to clean up temp prompt file {prompt_file}: {e}")
             return # <--- EXIT without Thinking
+
+        ## WE ALREADY HANDLE IT, TEMPORARILY DISABILING IT TO SEE HOW IT WORKS.
+
+        # # B2. Scribe Failure Detection
+        # event_type_b = norm["observed"].get("event_type", norm["observed"].get("event", ""))
+        # if event_type_b == "ScribeFailed":
+        #     content_str = str(norm["observed"].get("content", ""))
+        #     source_file = meta.get("source_tier_1", "unknown")
+        #     await self.log_guppi_event(
+        #         "ScribeFailed",
+        #         f"Scribe failed for {source_file}: {content_str[:200]}",
+        #         source="GUPPI:Background"
+        #     )
+        #     return  # EXIT without Thinking
         # 5. THINKING TRIGGER (The 7.2.3 Safety)
         # We pass norm["observed"] (The Envelope) so the LLM sees 'from', 'meta', and 'raw'.
         # GPT hates this because it's "messy", but it prevents context loss.
-        
+
         parent_evt_id = await self.log_guppi_event("NewInboxMessage", norm["observed"], source=f"inbox:{self.abe_name}")
         trigger_data = {"event": "Inbox", "payload": norm["observed"]}
-        
+
         await self.run_think_cycle(trigger_data, parent_evt_id, orientation_data=orientation_data)
 
     def _sanitize_log_content(self, content: Any, limit: int = 20000) -> Any:
         """
-        Targeted, schema-aware truncation. 
+        Targeted, schema-aware truncation.
         Only truncates known bloat keys to protect structural data integrity.
         """
         if isinstance(content, str):
@@ -1364,7 +1575,7 @@ class GuppiDaemon:
     async def _handle_alarm(self, orientation_data=None):
         """Checks todo.db for due tasks and wakes the agent if needed."""
         now_ts = datetime.utcnow().isoformat()
-        
+
         async with aiosqlite.connect(str(TODO_DB)) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
@@ -1372,7 +1583,7 @@ class GuppiDaemon:
                 (now_ts,)
             ) as cursor:
                 due_tasks = await cursor.fetchall()
-        
+
         if not due_tasks: return
 
         tasks_list = [dict(row) for row in due_tasks]
@@ -1380,7 +1591,7 @@ class GuppiDaemon:
             "event": "Alarm",
             "due_tasks": tasks_list
         }
-        
+
         parent_evt_id = await self.log_guppi_event("SystemAlarm", {"count": len(tasks_list)}, source="System")
         await self.run_think_cycle(trigger_data, parent_evt_id, orientation_data=orientation_data)
 
@@ -1404,14 +1615,12 @@ class GuppiDaemon:
 
         # 3. Logic (Now safe because 'data' is defined)
         logger.info(f"Internal Queue Received: {str(data)[:100]}...")
-        
+
         # Vector Result (GPU Worker)
         if data.get("event") == "ScribeResult" and "vector" in data.get("content", {}):
             await self._handle_vector_result(data)
             return
-        
         if data.get("type") == "embed":
-            # legacy form from earlier workers, should remove around 8.0
             await self._handle_vector_result(data)
             return
 
@@ -1419,7 +1628,7 @@ class GuppiDaemon:
         if "rag_result" in data:
             await self.log_guppi_event("InternalResult", data, source="Internal")
 
-    
+
     async def _fetch_chat_context(self, stream_name, count=5):
         try:
             raw = await self.r.xrevrange(stream_name, count=count)
@@ -1436,18 +1645,18 @@ class GuppiDaemon:
 
     # --- MAIN LOOP (Refractory Scheduler + Orientation) ---
 
-    
+
 
     async def main_wait_loop(self):
         logger.info("Entering Main Event Loop (Volition 8.0.0-rc2)...")
         await self.governor.set_status("idle")
-        
+
         # 1. RESTORED: Start Heartbeat
         self._bg_tasks.append(asyncio.create_task(self.heartbeat_loop()))
 
         # [8.0.3] Start Autoprune Background Task
         self._bg_tasks.append(asyncio.create_task(self._auto_prune_todo_db_loop()))
-        
+
         def safe_result(t):
             try: return t.result()
             except asyncio.CancelledError: return None
@@ -1461,7 +1670,7 @@ class GuppiDaemon:
                 self.last_sleep_ts = time.time()
                 now = time.time()
                 is_cooling_down = (now < self.cooldown_until)
-                
+
                 pending_tasks = []
 
                 # GROUP A: ALWAYS HOT (Senses)
@@ -1473,7 +1682,7 @@ class GuppiDaemon:
                 # GROUP B: REFRACTORY (Workload)
                 t_inbox = None
                 t_alarm = None
-                
+
                 if not is_cooling_down:
                     t_inbox = asyncio.create_task(self.r.blpop(f"inbox:{self.abe_name}", timeout=0))
                     sleep_time = await self.get_alarm_sleep_time()
@@ -1489,9 +1698,9 @@ class GuppiDaemon:
 
                 # --- WAIT ---
                 done, pending = await asyncio.wait(pending_tasks, return_when=asyncio.FIRST_COMPLETED)
-                for p in pending: 
+                for p in pending:
                     p.cancel()
-                    try: await p 
+                    try: await p
                     except asyncio.CancelledError: pass
 
                 fired = set(done)
@@ -1500,7 +1709,7 @@ class GuppiDaemon:
                 wake_ts = time.time()
                 time_asleep = wake_ts - self.last_sleep_ts
                 missed_digests = await self._sync_social_history(self.last_social_sync_ts, wake_ts)
-                self.last_social_sync_ts = wake_ts 
+                self.last_social_sync_ts = wake_ts
 
                 orientation_data = {
                     "time_asleep": time_asleep,
@@ -1514,35 +1723,36 @@ class GuppiDaemon:
                     if res:
                         for stream_name, messages in res:
                             last_msg_id = messages[-1][0]
-                            
+
                             # Stream Cursor Safety
                             new_ts, new_seq = self._parse_stream_id(last_msg_id)
                             current_cursor = self.active_streams.get(stream_name, "0-0")
                             old_ts, old_seq = self._parse_stream_id(current_cursor)
-                            
+
                             if (new_ts, new_seq) > (old_ts, old_seq):
                                 self.active_streams[stream_name] = last_msg_id
                             else:
                                 logger.warning(f"Stream Ignored: Duplicate ID {last_msg_id}")
-                                continue 
-                            
+                                continue
+
                             for msg_id, data in messages:
                                 if stream_name == "volition:kill_switch":
                                     logger.critical("KILL SWITCH RECEIVED.")
                                     await self.stop()
                                     return
-                                
+
                                 content_str = str(data.get("content", "")).lower()
                                 is_mentioned = (f"@{self.abe_name}" in content_str) or ("@all" in content_str)
-                                should_wake = (stream_name in self.explicit_subscriptions) or is_mentioned or (stream_name == "chat:synchronous") 
-                                
+                                should_wake = (stream_name in self.explicit_subscriptions) or is_mentioned or (stream_name in WAKE_ALL_CHAT_STREAMS)
+
                                 if should_wake:
                                     try:
-                                        context = await self._fetch_chat_context(stream_name)
+                                        context_limit = 12 if stream_name in MODERATED_CHAT_STREAMS else 5
+                                        context = await self._fetch_chat_context(stream_name, count=context_limit)
                                         parent_evt_id = await self.log_guppi_event("NewChatMessage", data, source=stream_name)
                                         trigger_data = {
-                                            "event": "Chat", "channel": stream_name, 
-                                            "message": data, "context_window": context, 
+                                            "event": "Chat", "channel": stream_name,
+                                            "message": data, "context_window": context,
                                             "mentioned": is_mentioned
                                         }
                                         await self.run_think_cycle(trigger_data, parent_evt_id, orientation_data=orientation_data)
@@ -1572,18 +1782,18 @@ class GuppiDaemon:
                         drain_count = 0
                         MAX_DRAIN = 20
                         drain_queue = f"inbox:{self.abe_name}"
-                        
+
                         while drain_count < MAX_DRAIN and not self._stopping:
                             # Non-blocking pop
                             raw_drain = await self.r.lpop(drain_queue)
                             if not raw_drain:
                                 break
-                            
+
                             # Process immediately
                             await self._handle_inbox_item((drain_queue, raw_drain), orientation_data=orientation_data)
                             drain_count += 1
                             await asyncio.sleep(0.01) # Yield to event loop
-                            
+
                         if drain_count > 0:
                             logger.info(f"⚡ Drained {drain_count} extra items in burst mode.")
                         # -----------------------------------------------------
@@ -1600,33 +1810,258 @@ class GuppiDaemon:
                 logger.error(f"Main Loop Error: {e}")
                 await asyncio.sleep(5)
 
+    def _extract_original_event(self, event_data: Any) -> Optional[str]:
+        """Safely extracts the original event name from nested trigger payloads.
+
+        Some inbox payloads carry payload.raw as a string, not a dict. This helper
+        prevents AttributeError from chains like payload.get("raw", {}).get("event").
+        """
+        if not isinstance(event_data, dict):
+            return None
+
+        payload = event_data.get("payload") or {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        raw_payload = payload.get("raw") or {}
+        if not isinstance(raw_payload, dict):
+            raw_payload = {}
+
+        return (
+            payload.get("event_type")
+            or payload.get("event")
+            or raw_payload.get("event")
+            or event_data.get("event")
+        )
+
+    def _model_name_blob(self, *model_names: Any) -> str:
+        """Builds a loose searchable model-name blob for capability gates."""
+        chunks = []
+        for name in model_names:
+            if not name:
+                continue
+
+            raw = str(name).strip().lower()
+            if not raw:
+                continue
+
+            chunks.append(raw)
+            chunks.append(
+                raw.replace("/", " ")
+                   .replace(":", " ")
+                   .replace("_", " ")
+                   .replace("-", " ")
+            )
+
+        return " ".join(chunks)
+
+    def _is_qwen36_model(self, *model_names: Any) -> bool:
+        """True for Qwen 3.6-ish model names, false for Qwen3.5/Gemma/MiMo/etc."""
+        blob = self._model_name_blob(*model_names)
+        if "qwen" not in blob:
+            return False
+
+        # Covers names like:
+        # - local/Qwen3.6-27B:thinking
+        # - Qwen3.6-27B
+        # - qwen36
+        # - qwen 3 6
+        return any(marker in blob for marker in ("3.6", "3 6", "36"))
+
+    def _preserve_thinking_enabled(self, *model_names: Any) -> bool:
+        """Public-repo safe gate for reasoning_content history reconstruction."""
+        mode = PRESERVE_THINKING_MODE
+
+        if mode in {"0", "false", "off", "no", "disabled", "disable"}:
+            return False
+
+        if mode in {"1", "true", "on", "yes", "force", "always", "enabled", "enable"}:
+            return True
+
+        # Default: auto-enable only for Qwen3.6 family models.
+        return self._is_qwen36_model(*model_names)
+
+    def _build_preserved_thinking_messages(
+        self,
+        current_prompt: str,
+        model_id: str,
+        history_limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Builds OpenAI-compatible chat messages for Qwen3.6 preserve_thinking.
+
+        Assistant messages remain the same ReAct JSON objects GUPPI already expects,
+        with native reasoning placed in reasoning_content for Qwen's chat template.
+        """
+        limit = PRESERVE_THINKING_TURNS if history_limit is None else int(history_limit)
+
+        if limit <= 0 or not self._preserve_thinking_enabled(model_id):
+            return [{"role": "user", "content": current_prompt}]
+
+        preserved_turns = []
+        for entry in self.log_buffer:
+            if entry.get("type") != "AbeTurn":
+                continue
+            if entry.get("status") != "completed":
+                continue
+            if not isinstance(entry.get("action"), dict):
+                continue
+
+            turn_id = entry.get("id")
+            if not turn_id:
+                continue
+
+            thought_sig = self._load_preserved_thinking(turn_id)
+
+            # Backward compatibility for old logs created before sidecar storage.
+            if not thought_sig:
+                old_sig = entry.get("thought_signature")
+                if (
+                    isinstance(old_sig, str)
+                    and old_sig.strip()
+                    and not old_sig.startswith("[PRESERVED_THINKING_STORED:")
+                ):
+                    thought_sig = old_sig
+
+            if not thought_sig:
+                continue
+
+            preserved_turns.append(entry)
+
+        preserved_turns = preserved_turns[-limit:]
+
+        messages: List[Dict[str, Any]] = []
+
+        for entry in preserved_turns:
+            messages.append({
+                "role": "user",
+                "content": (
+                    "[PREVIOUS_GUPPI_TURN_CONTEXT]\n"
+                    "Compact anchor for the following preserved assistant turn. "
+                    "Do not treat this as a separate task. Tool results and event "
+                    "details are provided through [WORKING_MEMORY_LOG] in the "
+                    "current prompt when still hot.\n"
+                    f"turn_id: {entry.get('id', 'unknown')}\n"
+                    f"parent_event_id: {entry.get('parent_event_id', 'unknown')}\n"
+                    f"timestamp_intent: {entry.get('timestamp_intent', '')}\n"
+                    f"timestamp_outcome: {entry.get('timestamp_outcome', '')}"
+                ),
+            })
+
+            assistant_json = {
+                "reasoning": entry.get("reasoning", ""),
+                "action": entry.get("action", {"tool": "hibernate"}),
+            }
+
+            turn_id = entry.get("id", "")
+            thought_sig = self._load_preserved_thinking(turn_id)
+
+            # Backward compatibility for old logs created before sidecar storage.
+            if not thought_sig:
+                old_sig = entry.get("thought_signature")
+                if (
+                    isinstance(old_sig, str)
+                    and old_sig.strip()
+                    and not old_sig.startswith("[PRESERVED_THINKING_STORED:")
+                ):
+                    thought_sig = old_sig
+
+            messages.append({
+                "role": "assistant",
+                "content": json.dumps(assistant_json, ensure_ascii=False),
+                "reasoning_content": thought_sig,
+            })
+
+        messages.append({"role": "user", "content": current_prompt})
+        return messages
+
+    def _preserved_thinking_dir(self) -> Path:
+        path = LOGS_DIR / "thoughts" / "by_turn"
+
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _preserved_thinking_path(self, turn_id: str) -> Path:
+        safe_turn = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(turn_id))
+        return self._preserved_thinking_dir() / f"{safe_turn}.json"
+
+    def _store_preserved_thinking(self, turn_id: str, reasoning_content: str) -> str:
+        """Store native model reasoning outside working.log.
+
+        working.log gets only a placeholder/ref. The raw trace is kept in a
+        private sidecar used for Qwen3.6 preserve-thinking reconstruction.
+        """
+        if not isinstance(reasoning_content, str) or not reasoning_content.strip():
+            return ""
+
+        self.preserved_thinking_cache[turn_id] = reasoning_content
+
+        payload = {
+            "turn_id": turn_id,
+            "agent": self.abe_name,
+            "created_at": datetime.utcnow().isoformat(),
+            "chars": len(reasoning_content),
+            "reasoning_content": reasoning_content,
+        }
+
+        path = self._preserved_thinking_path(turn_id)
+        with tempfile.NamedTemporaryFile(
+            "w",
+            dir=str(path.parent),
+            delete=False,
+            encoding="utf-8",
+        ) as tf:
+            json.dump(payload, tf, ensure_ascii=False)
+            tf.write("\n")
+            temp_path = Path(tf.name)
+
+        os.replace(temp_path, path)
+
+        return (
+            f"[PRESERVED_THINKING_STORED: {len(reasoning_content)} chars; "
+            f"ref={path.name}; omitted from working.log visible audit]"
+        )
+
+    def _load_preserved_thinking(self, turn_id: str) -> str:
+        cached = self.preserved_thinking_cache.get(turn_id)
+        if cached:
+            return cached
+
+        path = self._preserved_thinking_path(turn_id)
+        if not path.exists():
+            return ""
+
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            content = data.get("reasoning_content", "")
+            if isinstance(content, str) and content:
+                self.preserved_thinking_cache[turn_id] = content
+                return content
+        except Exception as e:
+            logger.warning(f"Failed to load preserved thinking for {turn_id}: {e}")
+
+        return ""
+
     # --- COGNITION (Atomic + Governor) ---
 
     async def run_think_cycle(self, event_data, parent_evt_id, force_model=None, system_notice=None, orientation_data=None, retry_count=0):
         """Atomic Think Cycle with Deadman Switch (Hybrid) + Urgency Fix."""
         cycle_id = event_data.get("id", "unknown")
-        
+
         # --- 1. URGENCY CHECK (ROBUST) ---
         is_urgent = False
-        
-        payload = event_data.get("payload", {})
+
         # [FIX] Check all layers of the payload for the event signature
-        original_event = (
-            payload.get("event_type") 
-            or payload.get("event") 
-            or payload.get("raw", {}).get("event")
-            or event_data.get("event") # Fallback to envelope
-        )
+        original_event = self._extract_original_event(event_data)
 
         # A. Emergency Channel
-        if event_data.get("channel") == "chat:synchronous": is_urgent = True
+        if event_data.get("channel") in URGENT_CHAT_STREAMS: is_urgent = True
         # B. System Escalations
         elif system_notice: is_urgent = True
         # C. Alarms
         elif event_data.get("event") == "Alarm": is_urgent = True
         # D. Own Task Completions (The Critical Fix)
-        elif original_event == "TaskCompleted": is_urgent = True 
-        
+        elif original_event == "TaskCompleted": is_urgent = True
+
         # --- 2. GOVERNOR ---
         if not is_urgent:
             if not await self.governor.check_limit():
@@ -1637,26 +2072,26 @@ class GuppiDaemon:
                 return
 
         await self.governor.set_status("thinking")
-        
+
         # [7.8] DEADMAN SWITCH TRACKING
         cycle_success = False
 
         try:
             event_type = event_data.get("event")
-            
-            # Check if this is a direct email rather than a system inbox event
-            payload_event_type = event_data.get("payload", {}).get("event_type", "")
-            is_human_email = (event_type == "Inbox" and payload_event_type == "NewInboxMessage")
-            
-            is_chat = (event_type == "Chat")
-            
+
+            # Social rooms use Flash; inbox, emergency chat, and system work use Pro.
+            channel = str(event_data.get("channel", "")).strip().lower()
+            is_social_chat = event_type == "Chat" and channel in {
+                "chat:general",
+                "chat:watercooler",
+            }
+
             if force_model is not None:
                 model = force_model
                 is_flash = (model == MODEL_FLASH)
                 target_url = os.environ.get("FLASH_API_URL") if is_flash else os.environ.get("PRO_API_URL")
             else:
-                # Route both Stream Chat and Direct Emails to Flash
-                if is_chat or is_human_email:
+                if is_social_chat:
                     model = MODEL_FLASH
                     is_flash = True
                     target_url = os.environ.get("FLASH_API_URL")
@@ -1664,9 +2099,9 @@ class GuppiDaemon:
                     model = MODEL_PRO
                     is_flash = False
                     target_url = os.environ.get("PRO_API_URL")
-            
+
             logger.info(f"Think Cycle: {event_type} -> {model} (Urgent: {is_urgent})")
-            
+
             if not orientation_data and not force_model:
               now = time.time()
               delta = now - self.last_sleep_ts
@@ -1674,49 +2109,86 @@ class GuppiDaemon:
                   missed = await self._sync_social_history(self.last_social_sync_ts, now)
                   orientation_data = {"time_asleep": delta, "missed_digests": missed}
                   self.last_social_sync_ts = now
+
             context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data)
-            if os.environ.get("GUPPI_DUMP_PROMPT") == "1":
+            messages = None
+            if self._preserve_thinking_enabled(model):
+                messages = self._build_preserved_thinking_messages(context, model)
+                logger.info(
+                    "Preserve-thinking enabled for %s with %d message(s)",
+                    model,
+                    len(messages),
+                )
+
+            # --- DEBUG DUMP ---
+            dump_prompt_enabled = (
+                os.environ.get("GUPPI_DUMP_PROMPT") == "1"
+                or os.environ.get("GUPPI_PROMPT_DUMP") == "1"
+            )
+
+            if dump_prompt_enabled:
                 dump_path = ABE_ROOT / "logs" / f"prompt_dump_{int(time.time())}.txt"
                 dump_path.parent.mkdir(parents=True, exist_ok=True)
                 dump_path.write_text(context, encoding="utf-8")
-                logger.warning("Dumped %d char context payload to %s", len(context), dump_path)
+                logger.warning(f"⚠️ Dumped {len(context)} char context payload to {dump_path}")
 
+                if messages is not None:
+                    msg_dump_path = ABE_ROOT / "logs" / f"prompt_messages_dump_{int(time.time())}.json"
+                    msg_dump_path.write_text(json.dumps(messages, indent=2, ensure_ascii=False), encoding="utf-8")
+                    logger.warning(f"⚠️ Dumped {len(messages)} chat message(s) to {msg_dump_path}")
+            # ---------------------------
             # [7.8.1] RETRY LOGIC WRAPPER
             try:
-                response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
+                response_payload = await self.call_abe_api(
+                    context,
+                    model_id=model,
+                    api_url=target_url,
+                    messages=messages,
+                )
             except ContextLengthExceededError:
                 logger.warning(f"Context window shattered ({model}). Engaging Panic Mode (dropping oldest memories) and retrying.")
-                
+
                 # Rebuild context with panic_mode=True
                 context = await self.build_abe_context(event_data, system_notice, orientation_data=orientation_data, panic_mode=True)
-                response_payload = await self.call_abe_api(context, model_id=model, api_url=target_url)
+                messages = None
+                if self._preserve_thinking_enabled(model):
+                    messages = self._build_preserved_thinking_messages(context, model)
+                response_payload = await self.call_abe_api(
+                    context,
+                    model_id=model,
+                    api_url=target_url,
+                    messages=messages,
+                )
             except LLMOutputError as e:
                 if retry_count < 1:
                     logger.warning(f"⚠️ Malformed JSON from {model}. Escalating to PRO for repair.")
-                    
+
                     repair_notice = (
                         f"SYSTEM ALERT: Your last response was invalid JSON. "
                         f"The error was: {e}. "
                         f"You must fix the JSON syntax. Check for unescaped quotes in the log data."
                     )
-                    
+
                     # RECURSIVE CALL: Force MODEL_PRO to fix the mess
                     return await self.run_think_cycle(
-                        event_data, 
-                        parent_evt_id, 
-                        force_model=MODEL_PRO, 
-                        system_notice=repair_notice, 
+                        event_data,
+                        parent_evt_id,
+                        force_model=MODEL_PRO,
+                        system_notice=repair_notice,
                         orientation_data=orientation_data,
                         retry_count=retry_count + 1
                     )
                 else:
                     # We failed twice. Stop the bleeding.
+                    # In future versions, I plan to add a small "JSON repair" LLM chain that will try to fix broken JSON, and only that.
                     logger.error(f"❌ JSON Repair failed after retry. Giving up.")
                     response_payload = {"reasoning": "JSON Repair Failed twice. Safety Shutdown.", "action": {"tool": "hibernate"}}
-            
+
+            native_reasoning = response_payload.pop("_native_reasoning_content", None)
+
             reasoning = response_payload.get("reasoning", "No reasoning provided.")
             action = response_payload.get("action", {"tool": "hibernate"})
-            thought_sig = response_payload.get("thoughtSignature")
+            thought_sig = native_reasoning or response_payload.get("thoughtSignature")
             tool = action.get("tool")
 
             # Implicit Escalation
@@ -1729,33 +2201,32 @@ class GuppiDaemon:
                     f"but was denied. You are now awake (Pro). "
                     f"Review the context and decide if this action is required."
                 )
-                
+
                 # Recursively call self with Force Pro
                 await self.run_think_cycle(
                     event_data, parent_evt_id, force_model=MODEL_PRO, system_notice=escalation_msg, orientation_data=orientation_data
                 )
-                cycle_success = True 
+                cycle_success = True
                 return
 
             turn_id = f"turn-{uuid.uuid4()}"
+
+            if native_reasoning and self._preserve_thinking_enabled(model):
+                thought_sig = self._store_preserved_thinking(turn_id, native_reasoning)
+
             await self.log_abe_intent(turn_id, parent_evt_id, reasoning, action, thought_signature=thought_sig)
             await self.execute_action(turn_id, action)
-            
+
             # [7.8] SUCCESS MARKER
             cycle_success = True
-            
+
         except asyncio.TimeoutError:
-            msg = "API request timed out. The GPU worker queue may be full."
+            # Explicit handling for the Thundering Herd
+            msg = "API Request Timed Out (>1800s). The GPU worker queue is full."
             logger.error(f"LLM Call Failed: {msg}")
             await self.log_abe_intent(f"fail-{uuid.uuid4()}", parent_evt_id, f"Error: {msg}", {"tool": "hibernate"})
 
-            payload = event_data.get("payload", {}) or {}
-            original_event = (
-                payload.get("event_type")
-                or payload.get("event")
-                or payload.get("raw", {}).get("event")
-                or event_data.get("event")
-            )
+            original_event = self._extract_original_event(event_data)
 
             if original_event != "CrashReport":
                 error_msg = {
@@ -1770,18 +2241,13 @@ class GuppiDaemon:
             return
 
         except Exception as e:
+            # Bulletproof fallback for ANY other weird Python exception
             err_type = type(e).__name__
             err_msg = str(e).strip() or repr(e)
             logger.error(f"LLM Call Failed [{err_type}]: {err_msg}")
             await self.log_abe_intent(f"fail-{uuid.uuid4()}", parent_evt_id, f"Error [{err_type}]: {err_msg}", {"tool": "hibernate"})
 
-            payload = event_data.get("payload", {}) or {}
-            original_event = (
-                payload.get("event_type")
-                or payload.get("event")
-                or payload.get("raw", {}).get("event")
-                or event_data.get("event")
-            )
+            original_event = self._extract_original_event(event_data)
 
             if original_event != "CrashReport":
                 error_msg = {
@@ -1791,13 +2257,13 @@ class GuppiDaemon:
                 }
                 try: await retry_async(self.r.lpush, f"inbox:{self.abe_name}", json.dumps(error_msg))
                 except: pass
-            
-            cycle_success = True 
+
+            cycle_success = True
             return
 
         finally:
             await self.governor.set_status("idle")
-            
+
             # [7.8] DEADMAN SWITCH (THE FINAL CATCH)
             if not cycle_success:
                 logger.critical(f"CYCLE GHOSTED: Event {cycle_id} consumed with no outcome.")
@@ -1809,21 +2275,36 @@ class GuppiDaemon:
                 try: await self.r.lpush(f"inbox:{self.abe_name}", json.dumps(alert))
                 except: pass
 
-    async def call_abe_api(self, prompt_text: str, model_id: str = GEMINI_MODEL, api_url: str = None) -> Dict:
+    async def call_abe_api(
+        self,
+        prompt_text: str,
+        model_id: str = GEMINI_MODEL,
+        api_url: str = None,
+        messages: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict:
         # Everything routes through the OpenAI-compatible endpoint now
-        return await self._call_openai_compat(model_id, prompt_text, api_url)
-    
-    async def _call_openai_compat(self, model_id, prompt, api_url=None):
+        return await self._call_openai_compat(
+            model_id,
+            prompt_text,
+            api_url,
+            messages=messages,
+        )
+
+    async def _call_openai_compat(self, model_id, prompt, api_url=None, messages=None):
+        original_model_id = str(model_id)
+
         # 1. Detect Thinking Intent
-        use_thinking = ":thinking" in model_id
-        if use_thinking: 
-            model_id = model_id.split(":")[0]
+        use_thinking = ":thinking" in original_model_id
+        if use_thinking:
+            model_id = original_model_id.split(":")[0]
+        else:
+            model_id = original_model_id
 
         # 2. Split-Brain Routing (Local vs Remote)
         if model_id.startswith("local/"):
             # Clean decoupling: use the passed URL, or fallback to a safe default
             base_url = (api_url or os.environ.get("PRO_API_URL", "http://127.0.0.1:8080/v1")).rstrip('/')
-            api_key = "sk-local-llama"  # Hardcoded dummy key so it stays out of .env
+            api_key = "local"  # Hardcoded dummy key so it stays out of .env
             actual_model = model_id.replace("local/", "")
             req_timeout = 2400 # Give local hardware time to think, especially if you're on like qwen3.5 or some such
         else:
@@ -1838,7 +2319,7 @@ class GuppiDaemon:
                     "reasoning": "Missing remote API credentials (OPENAI_API_KEY or OPENROUTER_API_KEY). I cannot think. Forcing hibernation.",
                     "action": {"tool": "hibernate"}
                 }
-            
+
         url = f"{base_url}/chat/completions"
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -1850,7 +2331,7 @@ class GuppiDaemon:
         # 1. Load the Identity Stats
         target_temp = float(self.identity.get("temp", 1.0))
         target_top_p = float(self.identity.get("top_p", 0.95))
-        
+
         # 2. Force top_k to be an integer (The "Abe-01" Safety)
         try:
             raw_k = self.identity.get("top_k", 40)
@@ -1859,31 +2340,50 @@ class GuppiDaemon:
         except:
             target_top_k = 40
 
+        preserve_thinking = self._preserve_thinking_enabled(original_model_id, actual_model)
+        model_name_blob = self._model_name_blob(original_model_id, actual_model)
+
         payload = {
             "model": actual_model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages or [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
             "temperature": target_temp,
             "top_p": target_top_p
         }
-        model_name_lower = actual_model.lower()
-        
-        if "qwen" in model_name_lower:
-            # Qwen Model Card: Needs strict penalties to prevent <think> loops
+
+        if self._is_qwen36_model(original_model_id, actual_model):
+            # Qwen3.6 model-card defaults for thinking mode.
+            # Does not inherit Qwen3.5's high presence penalty here.
             payload.update({
                 "top_k": 20,
+                "min_p": 0.0,
+                "presence_penalty": 0.0,
+                "repetition_penalty": 1.0
+            })
+
+            if preserve_thinking:
+                payload["chat_template_kwargs"] = {
+                    "enable_thinking": True,
+                    "preserve_thinking": True,
+                }
+
+        elif "qwen" in model_name_blob:
+            # Qwen3.5 / older Qwen behavior. Keeping the old stricter penalty path.
+            payload.update({
+                "top_k": 20,
+                "min_p": 0.0,
                 "presence_penalty": 1.5,
                 "repetition_penalty": 1.0
             })
-            
-        elif "gemma" in model_name_lower:
+
+        elif "gemma" in model_name_blob:
             # Gemma Model Card: Standardized sampling for best performance
             payload.update({
                 "top_k": 64,
-                "presence_penalty": 0.0,    # Gemma doesn't require high presence penalty
+                "presence_penalty": 0.0,
                 "repetition_penalty": 1.0
             })
-            
+
         else:
             # Safe Fallbacks for Scribe/Summarizer models (like Mistral/Nanbeige)
             payload.update({
@@ -1901,7 +2401,7 @@ class GuppiDaemon:
                 if resp.status != 200:
                     err = await resp.text()
                     logger.error(f"OpenAI-Compat Error {resp.status}: {err}")
-                    
+
                     if resp.status == 400:
                         is_context_error = False
                         try:
@@ -1913,21 +2413,21 @@ class GuppiDaemon:
                             # Fallback if the API returned raw text instead of JSON
                             if "context" in err.lower() or "tokens" in err.lower():
                                 is_context_error = True
-                                
+
                         if is_context_error:
                             raise ContextLengthExceededError("Context window shattered")
-                    
+
                     return {"reasoning": f"API Error: {resp.status}", "action": {"tool": "hibernate"}}
-                
+
                 data = await resp.json()
                 choice = data["choices"][0]
                 message = choice["message"]
-                
+
                 text = message.get("content", "")
-                
+
                 # 1. Grab native reasoning content (o1 / llama.cpp style)
                 reasoning = message.get("reasoning_content", "")
-                
+
                 # 2. Fallback: If the model stuffed <think> tags into the main content block
                 if not reasoning and "<think>" in text:
                     think_match = re.search(r'<think>(.*?)</think>', text, re.DOTALL)
@@ -1935,20 +2435,26 @@ class GuppiDaemon:
                         reasoning = think_match.group(1).strip()
                         # Strip the thinking block from the main text so we only parse the JSON
                         text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
-                
+
                 # 3. Offload the internal monologue to a forensic log (Chunked by Date)
                 if reasoning:
                     today_str = datetime.utcnow().strftime("%Y-%m-%d")
                     thoughts_file = ABE_ROOT / f"logs/thoughts/{self.abe_name}-{today_str}.thot"
                     thoughts_file.parent.mkdir(parents=True, exist_ok=True)
-                    
+
                     with open(thoughts_file, "a") as f:
                         ts = datetime.utcnow().isoformat()
                         f.write(f"\n--- [THOUGHT BURST: {ts}] ---\n{reasoning}\n--- [END] ---\n")
-                
-                # 4. Pass the pristine JSON to the cleaner
-                return self._clean_json(text, thought_sig=None)
 
+                # 4. Pass the pristine JSON to the cleaner.
+                # GUPPI owns native reasoning preservation; the model is not
+                # allowed to smuggle thoughtSignature inside its JSON.
+                parsed = self._clean_json(text, thought_sig=None)
+
+                if preserve_thinking and reasoning:
+                    parsed["_native_reasoning_content"] = reasoning
+
+                return parsed
 
     def _clean_json(self, text_response, thought_sig=None):
         try:
@@ -1969,6 +2475,17 @@ class GuppiDaemon:
                 else:
                     raise LLMOutputError("Ambiguous or invalid JSON array from LLM")
 
+            if not isinstance(parsed, dict):
+                raise LLMOutputError(
+                    f"LLM returned valid JSON but not an object: {type(parsed).__name__}"
+                )
+
+            if "action" not in parsed:
+                raise LLMOutputError("LLM JSON object missing required 'action' key")
+
+            if not isinstance(parsed.get("action"), dict):
+                raise LLMOutputError("LLM 'action' must be a JSON object")
+
             # Active Decontamination
             keys_to_scrub = ["thought_signature", "thoughtSignature"]
             for k in keys_to_scrub:
@@ -1980,15 +2497,15 @@ class GuppiDaemon:
             # Strip massive log dumps from the error message to keep logs clean
             logger.error(f"JSON Parse Failed. Raising LLMOutputError.")
             raise LLMOutputError(f"JSON Syntax Error: {str(e)}")
-        
+
 
     async def build_abe_context(self, current_event_data, system_notice=None, orientation_data=None, panic_mode=False):
         genesis = ""
         if GENESIS_PROMPT_FILE.exists():
             try: genesis = GENESIS_PROMPT_FILE.read_text()
             except: pass
-        
-        # v8.0.2: Identity Priors Injection (full, uncompressed)
+
+        # v8.0.2: Identity Priors Injection (NOW FULL, UNCOMPRESSED)
         priors = ""
         if PRIORS_SOURCE_FILE.exists():
             try: priors = f"\n[IDENTITY_PRIORS]\n{PRIORS_SOURCE_FILE.read_text().strip()}\n"
@@ -2004,8 +2521,8 @@ class GuppiDaemon:
                 episodes = sorted(EPISODES_DIR.glob("ep-*.md"), key=lambda f: f.stat().st_mtime, reverse=True)[:5]
                 for ep in episodes: summaries += f"\n--- EPISODE {ep.name} ---\n{ep.read_text()}\n"
             except: pass
-            
-            recent_log_block = f"[WORKING_MEMORY_LOG]\n{self._sanitize_history_block(15)}" # <--- Changed from 20   
+
+            recent_log_block = f"[WORKING_MEMORY_LOG]\n{self._sanitize_history_block(15)}" # <--- Changed from 20
             daily_log = self._get_daily_changelog_snippet()
 
         # v7.0: DYNAMIC PRUNING LOGIC
@@ -2013,7 +2530,7 @@ class GuppiDaemon:
         # Else, use Standard 15 items.
 
         use_orientation = False
-        
+
         if orientation_data:
             # If sleep > 1 hour, invoke orientation
             use_orientation = orientation_data.get("time_asleep", 0) > 3600
@@ -2027,7 +2544,7 @@ class GuppiDaemon:
                 social_text = ""
                 for d in digests:
                     social_text += f"• {d['time']}: ({d['count']} msgs) {d['summary']}\n"
-            
+
             orientation_block = f"""
 [ORIENTATION]
 Status: Waking Up from Deep Sleep
@@ -2037,14 +2554,16 @@ You were asleep for: {time_str}
 """
             # Prune log if deeply asleep
             recent_log_block = f"[IMMEDIATE_CONTEXT]\n{self._sanitize_history_block(3)}"
-            
-        
+
+
 
         try:
             now_iso = datetime.utcnow().isoformat()
             async with aiosqlite.connect(str(TODO_DB)) as conn:
                 conn.row_factory = aiosqlite.Row
                 async with conn.execute("SELECT * FROM tasks WHERE due_timestamp <= ? AND status NOT IN ('completed', 'cancelled')", (now_iso,)) as c:
+                    # Fetching as dicts makes it much easier for the LLM to read in the prompt
+                    # conn.row_factory = aiosqlite.Row
                     due_tasks = [dict(row) for row in await c.fetchall()]
         except Exception as e:
             logger.error(f"Failed to fetch due tasks for context: {e}")
@@ -2068,20 +2587,22 @@ You were asleep for: {time_str}
                 if f.is_file() and f.name not in core_scripts:
                     bin_files.append(f.name)
 
+        bin_files.sort()
+
         bin_list = ', '.join(bin_files) if bin_files else '(No local scripts yet)'
         bin_block = f"[LOCAL_CONTAINER_SCRIPTS]\n{bin_list}\n(These live inside your local LXC. Use 'shell' tool with 'cat ~/bin/<script>' to read how to use them)"
 
         # --- NEW INSERT (With detected_hosts fix) ---
         host_context_block = ""
         detected_hosts = []  # <--- Initializes it safely so it never throws undefined
-        
+
         if SCRIPT_REGISTRY_FILE.exists():
             try:
                 registry = json.loads(SCRIPT_REGISTRY_FILE.read_text())
                 event_str = json.dumps(current_event_data).lower()
-                
+
                 detected_hosts = [h for h in registry.keys() if h.lower() in event_str]
-                
+
                 if detected_hosts:
                     host_context_block = "\n[REMOTE_HOST_SCRIPTS]\n"
                     host_context_block += "(These live on external homelab servers. Use your 'remote_exec' tool to run them on the specified host.)\n"
@@ -2101,8 +2622,8 @@ You were asleep for: {time_str}
 [IDENTITY_PASSPORT]
 {json.dumps(self.identity, indent=2)}
 {bin_block}
-{host_context_block} 
-[TODAY'S CHANGELOG (Latest Entries)] 
+{host_context_block}
+[TODAY'S CHANGELOG (Latest Entries)]
 {daily_log}
 [TIER_2_MEMORY_EPISODES]
 {summaries}
@@ -2126,41 +2647,109 @@ You were asleep for: {time_str}
         try:
             if tool == "help":
                 result = self._tool_help(action.get("tool_name"))
-            
+
+            # 8.1: New(er) Clipboard
             # [NEW] 7.8: Clipboard Tool
             elif tool == "manage_clipboard":
-                sub = action.get("action", "read")
-                if sub == "read": 
+                sub = str(action.get("action", "read")).strip().lower()
+
+                if sub == "read":
                     result = {"status": "success", "content": self.clipboard.read()}
+
                 elif sub == "add":
-                    result = {"status": "success", "message": self.clipboard.add(action.get("content", ""))}
-                elif sub == "remove":
-                    idx = action.get("index") or action.get("indices")
-                    if idx:
-                        if isinstance(idx, (str, int)): idx = [int(idx)]
-                        result = {"status": "success", "message": self.clipboard.remove(idx)}
-                    else:
+                    result = {
+                        "status": "success",
+                        "message": self.clipboard.add(action.get("content", "")),
+                    }
+
+                elif sub in ("set", "overwrite"):
+                    result = {
+                        "status": "success",
+                        "message": self.clipboard.set(action.get("content", "")),
+                    }
+
+                elif sub == "insert":
+                    idx = action.get("index")
+                    if idx is None:
                         result = {"status": "error", "message": "Missing index"}
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.insert(idx, action.get("content", "")),
+                        }
+
+                elif sub in ("replace", "update", "edit"):
+                    idx = action.get("index")
+                    if idx is None:
+                        result = {"status": "error", "message": "Missing index"}
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.replace(idx, action.get("content", "")),
+                        }
+
+                elif sub in ("mark", "mark_done", "mark_status"):
+                    idx = action.get("index")
+                    if idx is None:
+                        result = {"status": "error", "message": "Missing index"}
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.mark(idx, action.get("status", "DONE")),
+                        }
+
+                elif sub == "remove":
+                    idx = action.get("indices", action.get("index"))
+                    if idx is None:
+                        result = {"status": "error", "message": "Missing index or indices"}
+                    else:
+                        if isinstance(idx, (str, int)):
+                            idx = [idx]
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.remove(idx),
+                        }
+
                 elif sub == "clear":
-                    result = {"status": "success", "message": self.clipboard.clear()}
+                    confirmed = action.get("confirm") is True
+                    if self.clipboard.has_items() and not confirmed:
+                        result = {
+                            "status": "refused",
+                            "message": self.clipboard.clear(confirm=False),
+                        }
+                    else:
+                        result = {
+                            "status": "success",
+                            "message": self.clipboard.clear(confirm=confirmed),
+                        }
+
+                else:
+                    result = {
+                        "status": "error",
+                        "message": f"Unknown manage_clipboard action: {sub}",
+                        "allowed_actions": [
+                            "read", "add", "set", "insert", "replace",
+                            "mark", "mark_done", "remove", "clear"
+                        ],
+                    }
 
             elif tool == "shell":
                 cmd = action.get("command")
                 await self._spawn_subprocess_exec(turn_id, cmd, tracked=True)
-                return 
+                return
 
             elif tool == "remote_exec":
                 host = action.get("host")
                 raw_cmd = action.get("command")
-                
+
                 if not host or not raw_cmd:
                     result = {"status": "error", "message": "Missing host or command"}
                     await self.patch_abe_outcome(turn_id, result)
                     return
-                
+
                 # FORCE BASH: Bypasses default 'fish' shell and loads bash profile paths
                 wrapped_cmd = f"/bin/bash -lc {shlex.quote(raw_cmd)}"
-                
+
                 logger.info(f"Remote Exec on {host} (Forcing Bash): {wrapped_cmd[:100]}...")
                 asyncio.create_task(self._run_remote_ssh(turn_id, host, wrapped_cmd))
                 return
@@ -2170,7 +2759,7 @@ You were asleep for: {time_str}
                 p.parent.mkdir(parents=True, exist_ok=True)
                 mode = action.get("mode", "w")
                 with open(p, mode) as f: f.write(action["content"])
-                
+
                 resolved_p = p.resolve()
                 if resolved_p == IDENTITY_FILE.resolve():
                     self._refresh_identity()
@@ -2184,8 +2773,8 @@ You were asleep for: {time_str}
                 directive = action.get("directive")
                 target_host = action.get("target_host", "local")
                 target_url = os.environ.get("ROAMER_API_URL", "http://127.0.0.1:8080/v1")
-                roamer_model = os.environ.get("MODEL_ROAMER", "local/qwen-2.5-14b-coder")
-                
+                roamer_model = os.environ.get("MODEL_ROAMER", "local/gemma4-26b-a4b")
+
                 if not directive:
                     result = {"status": "error", "message": "Missing directive for roamer"}
                 else:
@@ -2194,18 +2783,35 @@ You were asleep for: {time_str}
                         "--directive", directive,
                         "--target-host", target_host,
                         "--output-inbox", f"inbox:{self.abe_name}",
+                        "--parent-turn-id", turn_id,
                         "--api-url", target_url,
                         "--model", roamer_model
                     ]
                     # Spawn untracked so GUPPI isn't blocked waiting for the investigation
-                    await self._spawn_subprocess_exec(turn_id, cmd, tracked=False)
-                    result = {"status": "spawned_untracked", "note": f"Roamer dispatched to investigate '{target_host}'. Results will arrive in your inbox."}
+                    # Spawn logged-untracked so GUPPI is not blocked, but failures are not silent.
+                    log_path = await self._spawn_logged_untracked_exec(
+                        turn_id,
+                        cmd,
+                        label="roamer",
+                        notify_on_failure=True,
+                    )
+                    result = {
+                        "status": "spawned_logged_untracked",
+                        "note": (
+                            f"Roamer dispatched to investigate '{target_host}'. "
+                            f"Results should arrive in your inbox. "
+                            f"Debug log: {log_path}. "
+                            "Set a todo reminder for 20-30 minutes to check the Roamer result/log if no report arrives."
+                        ),
+                        "log_path": str(log_path),
+                    }
+
 
             elif tool == "spawn_scribe":
                 mode = action.get("mode", "summarize")
                 prompt_file_path = action.get("prompt_file") or action.get("target_file")
                 prompt_text = action.get("prompt", "")
-                
+
                 # Enforce routing rules based on the Genesis prompt promises
                 if mode == "analyze":
                     model = os.environ.get("MODEL_SCRIBE", "local/nanbeige-4.1-3B")
@@ -2218,6 +2824,8 @@ You were asleep for: {time_str}
                     target_url = os.environ.get("FLASH_API_URL", "http://127.0.0.1:8080/v1")
 
                 # v6.5: Intercept Vectorize requests
+                # BRANCH 1: VECTORIZATION (GPU Offload)
+                # Allows Abe to manually save knowledge to Tier 3 memory
                 if mode == "vectorize":
                     # Validate prompt_file_path is provided for vectorize mode
                     if prompt_file_path is None:
@@ -2227,18 +2835,18 @@ You were asleep for: {time_str}
                             p_path = Path(prompt_file_path)
                             if p_path.exists():
                                 content = p_path.read_text(encoding="utf-8")
-                                
+
                                 # [FIX] Enforce 'vec-' prefix so _handle_vector_result accepts it
                                 # If turn_id is "turn-123", this becomes "vec-turn-123"
                                 vec_task_id = f"vec-{turn_id}"
 
                                 # Statelessly stash the path in Redis for 1 hour (3600s)
                                 await retry_async(self.r.set, f"vec_meta:{vec_task_id}", str(p_path.resolve()), ex=3600)
-                                
+
                                 task_payload = {
                                     "task_id": vec_task_id,
                                     "type": "embed",
-                                    "content": content, 
+                                    "content": content,
                                     "source_file": str(p_path.resolve()), # <--- Pass the file path
                                     "reply_to": self.internal_queue # <--- Route to internal queue, not inbox directly
                                 }
@@ -2252,20 +2860,44 @@ You were asleep for: {time_str}
                 # the Fix for the "Prompt vs File" injection bug
                 else:
                     combined_content = ""
-                    
+
                     # 1. Inject instructions
                     if prompt_text:
                         combined_content += f"{prompt_text}\n\n"
-                    
+
                     # 2. Inject target file content
                     if prompt_file_path:
-                        p_path = Path(prompt_file_path)
-                        if p_path.exists():
+                        p_path = Path(prompt_file_path).expanduser()
+
+                        if not p_path.exists():
+                            result = {
+                                "status": "error",
+                                "message": (
+                                    f"Prompt file not found in local LXC: {prompt_file_path}. "
+                                    "spawn_scribe can only read local files inside the Abe container. "
+                                    "For remote files, use remote_exec to extract/decode the relevant text first, "
+                                    "write that text to a local temp file, then spawn_scribe on the local file."
+                                )
+                            }
+                            await self.patch_abe_outcome(turn_id, result)
+                            return
+
+                        try:
                             file_content = p_path.read_text(encoding="utf-8")
-                            combined_content += f"--- FILE CONTENT ({prompt_file_path}) ---\n{file_content}\n"
-                        else:
-                            combined_content += f"--- FILE MISSING: {prompt_file_path} ---\n"
-                    
+                        except UnicodeDecodeError:
+                            result = {
+                                "status": "error",
+                                "message": (
+                                    f"Prompt file is not valid UTF-8 text: {prompt_file_path}. "
+                                    "If this is a binary journal, decode it first with journalctl --file "
+                                    "and pass the decoded text to Scribe."
+                                )
+                            }
+                            await self.patch_abe_outcome(turn_id, result)
+                            return
+
+                        combined_content += f"--- FILE CONTENT ({prompt_file_path}) ---\n{file_content}\n"
+
                     # 3. Create temp file for the Scribe process
                     with tempfile.NamedTemporaryFile('w', delete=False) as pf:
                         pf.write(combined_content)
@@ -2274,7 +2906,7 @@ You were asleep for: {time_str}
                     meta_dict = {"action_id": turn_id, "mode": mode}
 
                     cmd = [
-                        sys.executable, str(BIN_DIR / "scribe.py"), 
+                        sys.executable, str(BIN_DIR / "scribe.py"),
                         "--model", model,
                         "--api-url", target_url,
                         "--prompt-file", final_prompt_file,
@@ -2351,7 +2983,7 @@ You were asleep for: {time_str}
             elif tool == "chat_post":
                 channel = action.get("channel", "chat:general")
                 entry = {"from": self.display_name, "content": action.get("message"), "timestamp": datetime.utcnow().isoformat()}
-                
+
                 # Generalized Auto-Release
                 lock_key = f"lock:{channel}"
                 lock_owner = await self.r.get(lock_key)
@@ -2364,19 +2996,35 @@ You were asleep for: {time_str}
             elif tool == "chat_grab_stick":
                 channel = action.get("channel", "chat:synchronous")
                 lock_key = f"lock:{channel}"
-                acquired = await self.r.set(lock_key, self.abe_name, nx=True, px=DEFAULT_LOCK_TTL_MS)
+                ttl_ms = int(action.get("ttl_ms", DEFAULT_LOCK_TTL_MS))
+                ttl_ms = max(5000, min(ttl_ms, 300000))
+
+                context_limit = int(action.get("context_limit", 12 if channel in MODERATED_CHAT_STREAMS else 5))
+                context_limit = max(1, min(context_limit, 25))
+                recent_context = await self._fetch_chat_context(channel, count=context_limit)
+
+                acquired = await self.r.set(lock_key, self.abe_name, nx=True, px=ttl_ms)
                 if acquired:
-                    # 8.0.2-rc3 SILENT ACQUISITION: Do not xadd to the channel. Just notify the local Abe.
-                    result = {"status": "granted", "channel": channel, "note": f"You hold the stick for {DEFAULT_LOCK_TTL_MS/1000}s. Proceed with chat_post."}
+                    result = {
+                        "status": "granted",
+                        "channel": channel,
+                        "note": f"You hold the stick for {ttl_ms/1000}s. Use this time to THINK, review recent_context, then chat_post.",
+                        "recent_context": recent_context,
+                    }
                 else:
                     current_owner = await self.r.get(lock_key)
-                    result = {"status": "denied", "channel": channel, "current_speaker": current_owner or "unknown"}
+                    result = {
+                        "status": "denied",
+                        "channel": channel,
+                        "current_speaker": current_owner or "unknown",
+                        "recent_context": recent_context,
+                    }
 
             elif tool == "chat_ignore":
                 result["status"] = "ignored"
                 await self.patch_abe_outcome(turn_id, result, notify=False)
                 return
-            
+
             elif tool in ("notify_human", "alert_human"):
                 if not NTFY_URL:
                     result = {
@@ -2395,8 +3043,8 @@ You were asleep for: {time_str}
                         timeout = aiohttp.ClientTimeout(total=5)
                         async with aiohttp.ClientSession(timeout=timeout) as session:
                             async with session.post(
-                                NTFY_URL, 
-                                data=f"[{kind}] {self.abe_name}: {msg}", 
+                                NTFY_URL,
+                                data=f"[{kind}] {self.abe_name}: {msg}",
                                 headers=headers
                             ) as resp:
                                 result = {"status": "sent", "code": resp.status, "kind": kind}
@@ -2417,18 +3065,19 @@ You were asleep for: {time_str}
                 result["status"] = "hibernating"
                 await self.patch_abe_outcome(turn_id, result, notify=False)
                 return
+
             #--- TOOL TOOLS ---
             elif tool == "manage_script_registry":
                 action_type = action.get("action", "add") # 'add', 'update', 'remove'
                 target_host = action.get("host", "").lower()
                 script_path = action.get("path")
                 desc = action.get("description", "")
-                
+
                 if not target_host or not script_path:
                     result = {"status": "error", "message": "Missing host or script path"}
                 elif target_host in ["local", "localhost", "127.0.0.1", "gsv-contents-under-pressure"]:
                     result = {
-                        "status": "error", 
+                        "status": "error",
                         "message": "Do NOT register local container scripts here. GUPPI injects your local ~/bin automatically. This registry is for REMOTE hosts only (e.g. alexandria, slv-wdym-buffering)."
                     }
                 else:
@@ -2436,10 +3085,10 @@ You were asleep for: {time_str}
                         registry = json.loads(SCRIPT_REGISTRY_FILE.read_text())
                     except:
                         registry = {}
-                    
+
                     if target_host not in registry:
                         registry[target_host] = {}
-                    
+
                     if action_type in ["add", "update"]:
                         if not desc:
                             result = {"status": "error", "message": "Missing description for script"}
@@ -2447,12 +3096,13 @@ You were asleep for: {time_str}
                             registry[target_host][script_path] = desc
                             self._atomic_write_json(SCRIPT_REGISTRY_FILE, registry)
                             result = {"status": "success", "note": f"Saved {script_path} to {target_host} registry."}
-                            
+
                     elif action_type == "remove":
                         if script_path in registry.get(target_host, {}):
                             del registry[target_host][script_path]
                             if not registry[target_host]:
                                 del registry[target_host]
+
                             self._atomic_write_json(SCRIPT_REGISTRY_FILE, registry)
                             result = {"status": "success", "note": f"Removed {script_path} from registry."}
                         else:
@@ -2473,18 +3123,18 @@ You were asleep for: {time_str}
             logger.exception("Action Execution Failed")
 
         # --- [NEW] LIMITED QUIET SUCCESS PATCH ---
-        # Only silence administrative state changes. 
+        # Only silence administrative state changes.
         # Chat, Email, and Shell MUST notify on success.
         quiet_tools = {
             "chat_ignore",
-            "hibernate" 
+            "hibernate"
         }
-        
+
         should_notify = True
         # If tool is quiet AND it didn't fail -> Silence it
         if tool in quiet_tools and result.get("status") not in ("error", "failed"):
             should_notify = False
-            
+
         await self.patch_abe_outcome(turn_id, result, notify=should_notify)
 
     # --- ACTION IMPLEMENTATIONS ---
@@ -2507,14 +3157,24 @@ You were asleep for: {time_str}
             "subscribe_channel": "Listen to a Redis Stream. Args: channel",
             "unsubscribe_channel": "Stop waking for a channel (except mentions). Args: channel",
             "chat_history": "Fetch past messages. Args: channel, limit (max 20)",
-            "chat_ignore": "Explicitly ignore an interrupt (e.g., chat) without taking action. Use this to signal 'Active Listening' without replying.",
-            "chat_grab_stick": f"ATTEMPT to acquire the 'Talking Stick' (lock) for a specific channel (default: chat:synchronous). Returns {{status: granted|denied}}. Lock expires in {DEFAULT_LOCK_TTL_MS/1000}s (use this time to THINK, then POST). Posting to the channel AUTOMATICALLY releases the lock. DO NOT hold the stick if you do not intend to post. Args: channel (optional)",
+            "chat_ignore": "Explicitly ignore a chat interrupt without replying. Use this for chat:synchronous or chat:watercooler when you have no useful contribution.",
+            "chat_grab_stick": f"ATTEMPT to acquire the 'Talking Stick' lock for a moderated channel. Defaults to chat:synchronous; also valid for chat:watercooler. Returns {{status: granted|denied, recent_context: [...]}}. Lock expires in {DEFAULT_LOCK_TTL_MS/1000}s by default unless ttl_ms is provided; use this time to THINK, review recent_context, then POST. Posting to the channel AUTOMATICALLY releases the lock. DO NOT hold the stick if you do not intend to post. Args: channel optional, ttl_ms optional, context_limit optional.",
             "chat_post": "Post a message to a channel. If you hold the lock for this channel, it is automatically released. Args: message, channel (optional, default: chat:general)",
             "notify_human": "Notify the human operator for coordination, questions, or permission. Use when you need a human decision before proceeding. This is non-urgent. Args: message, priority (optional)",
             "alert_human": "Alert the human operator about urgent issues, safety concerns, or broken invariants. Use sparingly for situations requiring immediate attention. Args: message, priority (optional)",
             "web_search": "Search the internet via SearXNG. Args: query",
             "web_read": "Read a webpage as Markdown. More useful when used in conjunction with search. You get full results if <5000 chars, if not, you'll get a saved file path which you can use with Scribe in analyze mode to tell it what you were looking for. Args: url",
-            "manage_clipboard": "Manage your persistent scratchpad. actions: 'read', 'add' (requires content), 'remove' (requires index or list of indices), 'clear'. Items here survive log flushing. Use this for temporary constraints, reminders, or scratch notes.",
+            "manage_clipboard": (
+                "Manage your persistent scratchpad. Use this for temporary reminders, scratchpad etc."
+                "Actions: read; add(content) appends one or more newline-separated items; "
+                "set/overwrite(content) replaces the whole clipboard; "
+                "insert(index, content) inserts before index; "
+                "replace(index, content) replaces one item; "
+                "mark/mark_done(index, status optional) marks an item [DONE], [IN PROGRESS], [BLOCKED], [FAILED], or [CANCELLED]; "
+                "remove(index or indices) deletes specific items; "
+                "clear(confirm=true) clears all items. "
+                "Use mark_done for routine checklist progress. Do not use clear for normal plan updates."
+            ),
             "manage_script_registry": "Add, update, or remove custom executable scripts in the fleet registry. Actions: add|update|remove. Args: action, host, path, description (required for add/update)."
         }
         if tool_name: return tools.get(tool_name, "Unknown tool")
@@ -2535,22 +3195,28 @@ You were asleep for: {time_str}
             where = "status NOT IN ('completed', 'cancelled') AND due_timestamp <= ?"
             params.append(now)
             order = "due_timestamp ASC"
+
         elif filter_mode == "upcoming":
             future = (datetime.utcnow() + timedelta(hours=24)).isoformat()
             where = "status NOT IN ('completed', 'cancelled') AND due_timestamp <= ?"
             params.append(future)
             order = "due_timestamp ASC"
+
         elif filter_mode == "recurring":
             where = "status NOT IN ('completed', 'cancelled') AND recurrence IS NOT NULL AND recurrence != ''"
             order = "due_timestamp ASC"
+
         elif filter_mode == "all":
             # Safety override: 'all' now strictly means 'all active'
             where = "status NOT IN ('completed', 'cancelled')"
             order = "due_timestamp ASC"
+
         elif filter_mode in ("completed", "history"):
             where = "status IN ('completed', 'cancelled')"
             order = "due_timestamp DESC"
+
         else:
+            # Fallback for hallucinated filters: default to active tasks only
             where = "status NOT IN ('completed', 'cancelled')"
             order = "due_timestamp ASC"
 
@@ -2565,6 +3231,7 @@ You were asleep for: {time_str}
     async def _auto_prune_todo_db_once(self, retention_days: int = 60, batch_size: int = 500):
         archive_file = ABE_ROOT / "memory" / "task_archive.jsonl"
         backup_file = TODO_DB.with_suffix(".bak.autoprune")
+
         cutoff = (datetime.utcnow() - timedelta(days=retention_days)).isoformat()
 
         query = """
@@ -2614,6 +3281,7 @@ You were asleep for: {time_str}
 
             task_ids = [row["task_id"] for row in rows]
             placeholders = ",".join("?" for _ in task_ids)
+
             await conn.execute(
                 f"DELETE FROM tasks WHERE task_id IN ({placeholders})",
                 task_ids,
@@ -2639,7 +3307,7 @@ You were asleep for: {time_str}
         tid = f"task-{uuid.uuid4().hex[:8]}"
         due_dt = self._parse_due_time(action.get("due", "24h"))
         recurrence = action.get("recurrence", "")
-        
+
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             await conn.execute(
                 "INSERT INTO tasks (task_id, description, priority, due_timestamp, created_timestamp, source_abe, status, recurrence) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -2651,7 +3319,7 @@ You were asleep for: {time_str}
     async def _tool_snooze(self, action):
         tid = action.get("task_id")
         due_dt = self._parse_due_time(action.get("due_in", "1h"))
-        
+
         async with aiosqlite.connect(str(TODO_DB)) as conn:
             await conn.execute("UPDATE tasks SET due_timestamp = ? WHERE task_id = ?", (due_dt.isoformat(), tid))
             await conn.commit()
@@ -2672,6 +3340,7 @@ You were asleep for: {time_str}
             recurrence = row["recurrence"]
 
             if recurrence:
+                # Do the timedelta math here based on recurrence (e.g., +24h)
                 new_due_dt = self._parse_due_time(recurrence)
                 await conn.execute("UPDATE tasks SET due_timestamp = ?, status = 'pending' WHERE task_id = ?", (new_due_dt.isoformat(), tid))
                 await conn.commit()
@@ -2718,7 +3387,7 @@ You were asleep for: {time_str}
             "previous_status": row["status"],
             "note": "Task cancelled and will no longer recur."
         }
-    
+
     async def _tool_web_search(self, query):
         if not query: return {"status": "error", "message": "No query"}
         try:
@@ -2727,18 +3396,18 @@ You were asleep for: {time_str}
                 async with s.get(SEARXNG_URL, params={"q": query, "format": "json"}, timeout=15) as r:
                     if r.status != 200: return {"status": "error", "code": r.status}
                     data = await r.json()
-            
+
             raw_results = data.get("results", [])
             if not raw_results:
                 # [FIX] Explicit failure so Abe knows to try again
                 return {
-                    "status": "failed", 
+                    "status": "failed",
                     "message": "Zero results found. Your query might be too specific, or the search engine is blocking requests. Try simplifying keywords."
                 }
 
             return {"results": [{"title": res.get("title"), "url": res.get("url")} for res in raw_results[:5]]}
         except Exception as e: return {"error": str(e)}
-        
+
     async def _tool_web_read(self, url):
         if not url or not trafilatura: return {"error": "Trafilatura missing or no URL"}
         try:
@@ -2768,7 +3437,122 @@ You were asleep for: {time_str}
                 "path": str(file_path),
                 "preview": text[:1000] + "\n\n... [TRUNCATED. Use 'spawn_scribe' in 'analyze' mode and pass this file path along with specific instructions on what you are looking for.] ..."
             }
-        except Exception as e: return {"error": str(e)}
+        except Exception as e:
+            return {"error": str(e)}
+
+    def _tail_file_text(self, path: Path, max_bytes: int = 4000) -> str:
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                size = f.tell()
+                f.seek(max(0, size - max_bytes))
+                data = f.read()
+            return data.decode("utf-8", errors="replace")
+        except Exception as e:
+            return f"(Failed to read log tail: {e})"
+
+    async def _monitor_logged_untracked_process(
+        self,
+        turn_id: str,
+        proc,
+        log_path: Path,
+        log_fh,
+        label: str,
+        notify_on_failure: bool = True,
+    ):
+        try:
+            rc = await proc.wait()
+            try:
+                footer = f"\n\n--- {label} exited with code {rc} at {datetime.utcnow().isoformat()} ---\n"
+                log_fh.write(footer.encode("utf-8", errors="replace"))
+                log_fh.flush()
+            except Exception:
+                pass
+
+            if rc != 0 and notify_on_failure:
+                tail = await asyncio.to_thread(self._tail_file_text, log_path, 4000)
+                msg = {
+                    "type": "GUPPIEvent",
+                    "event": f"{label.title()}Failed",
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "content": (
+                        f"{label} subprocess exited with code {rc}. "
+                        f"Log: {log_path}\n\n--- LOG TAIL ---\n{tail}"
+                    ),
+                    "meta": {
+                        "source": "guppi",
+                        "subprocess_label": label,
+                        "action_id": turn_id,
+                        "log_path": str(log_path),
+                        "returncode": rc,
+                    },
+                }
+                await retry_async(self.r.lpush, f"inbox:{self.abe_name}", json.dumps(msg))
+                self._local_wakeup.set()
+
+        except Exception as e:
+            logger.error(f"Logged subprocess monitor failed for {turn_id}: {e}", exc_info=True)
+        finally:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
+
+    async def _spawn_logged_untracked_exec(
+        self,
+        turn_id: str,
+        cmd,
+        label: str = "job",
+        notify_on_failure: bool = True,
+    ) -> Path:
+        log_dir = LOGS_DIR / label
+        log_dir.mkdir(parents=True, exist_ok=True)
+
+        safe_turn = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(turn_id))
+        ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        log_path = log_dir / f"{ts}-{safe_turn}.log"
+
+        log_fh = open(log_path, "ab", buffering=0)
+        header = (
+            f"--- {label} started at {datetime.utcnow().isoformat()} ---\n"
+            f"turn_id: {turn_id}\n"
+            f"cmd: {cmd!r}\n\n"
+        )
+        log_fh.write(header.encode("utf-8", errors="replace"))
+
+        try:
+            if isinstance(cmd, str):
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=log_fh,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+            else:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=log_fh,
+                    stderr=asyncio.subprocess.STDOUT,
+                )
+
+            asyncio.create_task(
+                self._monitor_logged_untracked_process(
+                    turn_id=turn_id,
+                    proc=proc,
+                    log_path=log_path,
+                    log_fh=log_fh,
+                    label=label,
+                    notify_on_failure=notify_on_failure,
+                )
+            )
+            logger.info(f"Spawned logged untracked {label} for {turn_id}; log={log_path}")
+            return log_path
+
+        except Exception:
+            try:
+                log_fh.close()
+            except Exception:
+                pass
+            raise
 
     async def _spawn_subprocess_exec(self, turn_id, cmd, tracked=True):
         if tracked: await self.subproc_semaphore.acquire()
@@ -2777,31 +3561,31 @@ You were asleep for: {time_str}
                 # Shell command
                 shell_limit = int(max(10, SUBPROC_TIMEOUT - 5))
                 wrapped_cmd = f"export DEBIAN_FRONTEND=noninteractive; timeout -k 5 {shell_limit}s bash -c {shlex.quote(cmd)}"
-                
+
                 # Tracked = Capture Output / Untracked = Send to Void (Prevents Deadlock)
                 std_dest = asyncio.subprocess.PIPE if tracked else asyncio.subprocess.DEVNULL
-                
+
                 proc = await asyncio.create_subprocess_shell(
-                    wrapped_cmd, 
-                    stdout=std_dest, 
+                    wrapped_cmd,
+                    stdout=std_dest,
                     stderr=std_dest
                 )
             else:
                 # Exec command
                 std_dest = asyncio.subprocess.PIPE if tracked else asyncio.subprocess.DEVNULL
-                
+
                 proc = await asyncio.create_subprocess_exec(
-                    *cmd, 
-                    stdout=std_dest, 
+                    *cmd,
+                    stdout=std_dest,
                     stderr=std_dest
                 )
-            
+
             if tracked:
                 self.running_subprocesses[turn_id] = proc
                 asyncio.create_task(self._monitor_subprocess(turn_id, proc))
             else:
                 # [FIX] Fire-and-forget waiter to reap the zombie from process table
-                asyncio.create_task(proc.wait()) 
+                asyncio.create_task(proc.wait())
                 logger.info(f"Spawned untracked process for {turn_id}")
             return True
 
@@ -2814,17 +3598,17 @@ You were asleep for: {time_str}
         try:
             async with asyncssh.connect(host) as conn:
                 res = await asyncio.wait_for(conn.run(cmd), timeout=SSH_CMD_TIMEOUT)
-                
-                # [FIX] Do NOT truncate here. Pass raw output to patch_abe_outcome 
+
+                # [FIX] Do NOT truncate here. Pass raw output to patch_abe_outcome
                 # to handle single-source truncation and preserve safety warnings.
                 await self.patch_abe_outcome(turn_id, {
-                "stdout": res.stdout,
-                "stderr": res.stderr,
+                "stdout": self._decode_tool_output(res.stdout, "remote stdout"),
+                "stderr": self._decode_tool_output(res.stderr, "remote stderr"),
                 "code": res.exit_status,
             })
         except Exception as e:
             await self.patch_abe_outcome(turn_id, {"error": str(e)})
-    
+
     async def _handle_spawn_abe(self, turn_id, action):
         host = action.get("host")
         script = action.get("spawn_script", "spawn_abe_lxc.sh")
@@ -2832,7 +3616,7 @@ You were asleep for: {time_str}
         asyncio.create_task(self._run_remote_ssh(turn_id, host, f"bash {script}"))
 
     async def _query_vector_db(self, query: str, limit: int = 5):
-        """Search Tier 3 Memory (ChromaDB) using remote GPU embeddings."""
+        """Searches Tier 3 Memory (ChromaDB) using remote GPU embeddings."""
         query = (query or "").strip()
         if not query:
             return [{"content": "RAG_SEARCH_ERROR: Empty query provided.", "meta": {"error": "empty_query"}}]
@@ -2898,8 +3682,8 @@ You were asleep for: {time_str}
         except Exception as e:
             logger.exception("ChromaDB query crashed")
             return [{"content": f"RAG_SEARCH_ERROR: Vector DB query failed: {type(e).__name__}: {e}", "meta": {"error": "vector_db_crash"}}]
-    
-    
+
+
 
     async def _get_remote_embedding(self, text: str) -> Optional[List[float]]:
         """RPC call to gpu_worker.py via Redis to get Nomic embeddings."""
@@ -2907,20 +3691,20 @@ You were asleep for: {time_str}
         temp_q = f"temp:req:{req_id}"
         # Match the protocol expected by gpu_worker.py
         payload = {
-            "task_id": req_id, 
-            "type": "embed", 
-            "content": text, 
+            "task_id": req_id,
+            "type": "embed",
+            "content": text,
             "reply_to": temp_q
         }
-        
+
         try:
             # Send Request
             await retry_async(self.r.lpush, "queue:gpu_heavy", json.dumps(payload))
-            
+
             # Wait for Reply (Block for max 5s)
             # blpop returns tuple (key, value)
             res = await self.r.blpop(temp_q, timeout=30)
-            
+
             if res:
                 data = json.loads(res[1])
                 # Protocol: Worker returns {"content": {"vector": [...]}} for embed tasks
@@ -2928,14 +3712,14 @@ You were asleep for: {time_str}
         except Exception as e:
             logger.error(f"Remote Embedding RPC failed: {e}")
             return None
-        
+
     async def _handle_vector_result(self, result_payload: Dict):
         """Ingests a returned vector from GPU worker into ChromaDB."""
         try:
             task_id = result_payload.get("task_id", "")
             content = result_payload.get("content", {})
             vector = content.get("vector")
-            
+
             if not vector or not task_id.startswith("vec-"): return False
 
             # Retrieve the path from Redis (stateless)
@@ -2946,7 +3730,7 @@ You were asleep for: {time_str}
             else:
                 # If it's not in Redis, check if it was echoed back, just in case
                 source_file = result_payload.get("source_file")
-            
+
             if source_file:
                 ep_path = Path(source_file)
                 ep_filename = ep_path.name
@@ -2986,15 +3770,15 @@ You were asleep for: {time_str}
                 except Exception as e:
                     logger.error(f"Vector insert failed for {task_id}: {e}", exc_info=True)
                     raise
-                
+
             await asyncio.to_thread(_insert_sync)
             logger.info(f"Successfully stored vector for {ep_filename} in Tier 3 Memory.")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to store vector result: {e}")
             return False
-    
+
 
     async def stop(self):
         logger.info("Shutting down GUPPI...")
