@@ -15,18 +15,21 @@ from typing import List
 
 import redis.asyncio as redis
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import uvicorn
 
 # --- CONFIG ---
-REDIS_HOST = os.environ.get("REDIS_HOST")
+REDIS_HOST = os.environ.get("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
 REDIS_PASSWORD = os.environ.get("REDIS_PASSWORD", "volition")
 REDIS_URL = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/0"
 DASHBOARD_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = DASHBOARD_DIR / "templates"
+DEFAULT_CHAT_STREAMS = ["chat:general", "chat:watercooler", "chat:synchronous"]
+DASHBOARD_HOST = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+DASHBOARD_PORT = int(os.environ.get("DASHBOARD_PORT", "8000"))
 
 # --- APP SETUP ---
 app = FastAPI(title="Volition Command")
@@ -54,6 +57,16 @@ async def get_dashboard(request: Request):
     
     # Fallback to desktop
     return templates.TemplateResponse("index.html", {"request": request})
+
+@app.get("/debug", response_class=JSONResponse)
+async def get_debug():
+    """Tiny sanity check so it is obvious which dashboard process is running."""
+    return {
+        "app": "volition-dashboard",
+        "port": DASHBOARD_PORT,
+        "desktop_template": "index.html",
+        "mobile_template": "mobile.html",
+    }
 
 # --- REDIS MANAGER ---
 class RedisManager:
@@ -151,13 +164,13 @@ manager = ConnectionManager()
 async def redis_listener():
     await rm.connect()
 
-    streams = {
-        "chat:general": "$",
-        "chat:synchronous": "$",
-        "volition:action_log": "$",
-        "volition:heartbeat": "$",
-        "volition:social_digests": "$"
-    }
+    streams = {stream: "$" for stream in DEFAULT_CHAT_STREAMS}
+    streams.update({
+         "volition:action_log": "$",
+         "volition:heartbeat": "$",
+         "volition:social_digests": "$"
+    })
+
 
     last_scan = 0
     print("👂 Volition Backend Listening...")
@@ -220,7 +233,7 @@ async def websocket_endpoint(websocket: WebSocket):
         # 2. Send History with Error Handling
         
         # 2a. Chat Channels (Standard History - 100 items)
-        for stream in ["chat:general", "chat:synchronous"]:
+        for stream in DEFAULT_CHAT_STREAMS:
              try:
                  hist = await rm.get_history(stream, 100)
                  for msg_id, data in hist:
@@ -346,8 +359,8 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     uvicorn.run(
         "volition_dashboard:app",
-        host="0.0.0.0",
-        port=8000,
+        host=DASHBOARD_HOST,
+        port=DASHBOARD_PORT,
         reload=False,
         access_log=False,
     )

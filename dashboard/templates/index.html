@@ -365,6 +365,7 @@
                   >
                     <span><span className="faint">#</span> {channel.replace("chat:", "")}</span>
                     {channel === "chat:synchronous" && <span className="text-[10px] muted">sync</span>}
+                    {channel === "chat:watercooler" && <span className="text-[10px] muted">room</span>}
                   </button>
                 ))}
                 <button
@@ -451,7 +452,7 @@
           <main className="surface flex min-w-0 flex-1 flex-col rounded-[10px]">
             <WorkspaceHeader
               title={`#${displayChannel}`}
-              subtitle={channel === "chat:synchronous" ? "Synchronous fleet channel" : "Shared fleet channel"}
+              subtitle={channel === "chat:synchronous" ? "Synchronous fleet channel" : channel === "chat:watercooler" ? "Moderated morning/social room" : "Shared fleet channel"}
             />
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5 scrollbar-thin">
               <div className="mx-auto max-w-5xl space-y-1">
@@ -856,8 +857,8 @@
         const [socket, setSocket] = useState(null);
         const [connected, setConnected] = useState(false);
         const [identity, setIdentity] = useState("Human-Abe");
-        const [activeView, setActiveView] = useState("chat:general");
-        const [channels, setChannels] = useState(["chat:general", "chat:synchronous"]);
+        const [activeView, setActiveView] = useState("chat:watercooler");
+        const [channels, setChannels] = useState(["chat:general", "chat:watercooler", "chat:synchronous"]);
         const [chats, setChats] = useState({});
         const [actions, setActions] = useState([]);
         const [digests, setDigests] = useState([]);
@@ -885,10 +886,11 @@
                 if (msg.type === "channel_discovery") {
                   setChannels((prev) => {
                     if (prev.includes(msg.channel)) return prev;
+                    const core = ["chat:general", "chat:watercooler", "chat:synchronous"];
                     const discovered = [...prev, msg.channel]
-                      .filter((channel) => channel !== "chat:general" && channel !== "chat:synchronous")
+                      .filter((channel) => !core.includes(channel))
                       .sort();
-                    return ["chat:general", "chat:synchronous", ...discovered];
+                    return [...core, ...discovered];
                   });
                   return;
                 }

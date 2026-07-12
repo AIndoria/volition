@@ -544,8 +544,8 @@
         const [socket, setSocket] = useState(null);
         
         const [chats, setChats] = useState({});
-        const [activeChannel, setActiveChannel] = useState("chat:general");
-        const [channels, setChannels] = useState(["chat:general"]);
+        const [activeChannel, setActiveChannel] = useState("chat:watercooler");
+        const [channels, setChannels] = useState(["chat:general", "chat:watercooler", "chat:synchronous"]);
         const [actions, setActions] = useState([]);
         const [digests, setDigests] = useState([]);
         const [heartbeats, setHeartbeats] = useState([]);
@@ -572,7 +572,12 @@
              try {
                  const msg = JSON.parse(event.data);
                  if (msg.type === "channel_discovery") {
-                     setChannels(prev => prev.includes(msg.channel) ? prev : [...prev, msg.channel].sort());
+                     setChannels(prev => {
+                      if (prev.includes(msg.channel)) return prev;
+                      const core = ["chat:general", "chat:watercooler", "chat:synchronous"];
+                      const discovered = [...prev, msg.channel].filter(ch => !core.includes(ch)).sort();
+                      return [...core, ...discovered];
+                     });
                  }
                  else if (msg.type === "stream_event") {
                      if (msg.stream.startsWith("chat:")) {
